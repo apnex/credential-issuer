@@ -25,7 +25,8 @@ A client shows a standing code only to the issuer, never to a hub, and an admiss
 **A proof the host accepts** means what a client shows the issuer to be given an admission key: a person's sign-in, which a verifier the host chose checks, or a standing code.\
 Whether that proof's principal may have a key for that hub is decided by a rule the host gives the issuer, which the issuer applies and does not write.
 
-**Worth almost nothing once used** means an admission key admits one connection, from the node it names to the hub it names, within about a minute of being issued: whoever presents it first in that minute is admitted, and every later presentation is refused, its owner's retry included, which is why a client never presents a key twice; and a key is never accepted as proof for another key.
+**Worth almost nothing once used** means an admission key admits one connection, from the node it names to the hub it names, within about a minute of being issued: whoever presents it first in that minute, claiming that node, is admitted, and every later presentation is refused, its owner's retry included, which is why a fetcher never presents a key twice; and a key is never accepted as proof for another key.\
+A bearer copy of a used key admits no one, but presented while the key is live it can still end the session that used the key first, which then reconnects with a fresh key; that disruption is the price of making a stolen key's use visible.
 
 ---
 
