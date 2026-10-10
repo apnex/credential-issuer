@@ -1,0 +1,36 @@
+{
+  "name": "@apnex/credential-issuer",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Issue the credentials a caller presents to reach a hub, from authority the host accepts.",
+  "license": "MIT",
+  "author": "apnex",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/apnex/credential-issuer.git"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p .",
+    "test": "npm run build && node --test \"test/**/*.test.js\"",
+    "docs:check": "tools/check-docs.sh"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "5.9.3"
+  }
+}
