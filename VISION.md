@@ -19,13 +19,13 @@ Four terms in that sentence carry weight, so this document defines them rather t
 
 **A connection** means one session a client opens to a hub and keeps until it disconnects: the hub admits it once, when it opens, and not again for each request it carries.
 
-**A credential** means something a client presents to be admitted, of two kinds: a *standing code*, which a signed-in person mints for a machine and which lasts until it is revoked, and an *admission key*, which is issued for one connection.\
-A standing code is shown only to the issuer, never to a hub; an admission key is shown only to the hub it names.
+**A credential** means something a client presents on its way to being admitted, of two kinds: a *standing code*, which a signed-in person mints for a machine they provision, under an identity the host's rule lets them hold, and which lasts until it is revoked or reaches an expiry its minter chose; and an *admission key*, which is issued for one connection from one node to one hub.\
+A client shows a standing code only to the issuer, never to a hub, and an admission key only to the hub it names; a hub refuses anything else.
 
 **A proof the host accepts** means what a client shows the issuer to be given an admission key: a person's sign-in, which a verifier the host chose checks, or a standing code.\
-Whether that proof's principal may have a key for that hub is the host's rule, not the issuer's.
+Whether that proof's principal may have a key for that hub is decided by a rule the host gives the issuer, which the issuer applies and does not write.
 
-**Worth almost nothing once used** means an admission key admits one connection, to one hub, within about a minute of being issued; a copy is refused once the key has been used, and a key is never accepted as proof for another key.
+**Worth almost nothing once used** means an admission key admits one connection, from the node it names to the hub it names, within about a minute of being issued: whoever presents it first in that minute is admitted, and every later presentation is refused, its owner's retry included, which is why a client never presents a key twice; and a key is never accepted as proof for another key.
 
 ---
 
@@ -37,20 +37,21 @@ A browser should hold no lasting secret, a command line or an agent must hold on
 Each bridge loses something.\
 A token the server accepts directly is as good to a thief as to its owner for as long as it lives, a cookie reaches only a server on the page's own site, and a second application builds the same codes, hashes and revocations again.
 
-credential-issuer builds that bridge once: clients prove themselves to an issuer, and every connection is admitted with a key made for it alone, so a hub sees one kind of credential from every client, and holds nothing that could admit anyone later.
+credential-issuer builds that bridge once: clients prove themselves to an issuer, and every connection is admitted with a key made for it alone, so a hub sees one kind of credential from every client, and keeps nothing a client could present to be admitted later.
 
 ---
 
 ## What it is
 
-An embeddable library in three parts, one duty: issuing the credentials that reach a hub.
+A library whose three parts are embedded in three places, with one duty: issuing the credentials that reach a hub.
 
 - **The issuer**, served by the application, mints and revokes standing codes for signed-in people, and gives admission keys to clients that prove themselves.
-- **The redeemer**, embedded in the hub, checks each admission key as the connection is admitted, records its one use, and reports a second use, naming the session that used the key first for the hub to close.
+- **The redeemer**, embedded in the hub, checks each admission key as the connection is admitted, records its one use, and reports a second use; while the key is live, it names the session that used the key first, for the host to close.
 - **The fetcher**, embedded where each client's connection is held, obtains a fresh key before every connection and every reconnection, and keeps none.
 
-Its shapes are OAuth 2.0's wherever one fits, so an application that already runs an authorization server can stand in for the issuer.\
-The application supplies its verifiers, its rule on who may have a key for which hub, and where the issuer is served; the transport carries the key and proves it.
+The three parts are one duty because they share one key and one rule of single use; split, the key's format and that rule would become a contract between components always used together.\
+Its shapes are OAuth 2.0's wherever one fits, so existing libraries can read its keys, and an authorization server an application already runs can stand in for the issuer where it is extended to issue keys for one use.\
+The application supplies its verifiers, its rule on who may have a key for which hub, and where the issuer is served; the transport carries the key and, where its profile can, proves possession of it.
 
 ---
 
@@ -60,7 +61,7 @@ The application supplies its verifiers, its rule on who may have a key for which
 It signs no one in, creates no accounts, and holds no passwords; it accepts the sign-ins of providers the application trusts.
 
 **Not a verifier of who someone is.**\
-Who a sign-in or a key says is calling is established by the host's verifiers, through the component that establishes each request's principal; the issuer stamps a principal it was given, and decides nothing about it.
+It checks only its own credentials; who a person's sign-in says they are is established by the host's verifiers, and the principal of each request by the component that establishes it, so the issuer judges no one's identity and applies the host's rule to a principal it was given.
 
 **Not an authority.**\
 It says whether a connection may open, never what a caller may do once it has; which principal may read or change which thing is the application's.
@@ -69,7 +70,7 @@ It says whether a connection may open, never what a caller may do once it has; w
 It protects no channel and frames nothing; the transport carries a key and, where its profile can, proves possession of it.
 
 **Not a renewer of open connections.**\
-A key matters when a connection is admitted and never afterwards; a connection runs until it disconnects.
+A key matters when a connection is admitted; afterwards nothing renews or rechecks it, a connection runs until it disconnects, and the one later event a key can still cause is a second use while it is live, after which the host may close the session that used it first.
 
 **Not an authorization server for every purpose.**\
 It borrows OAuth's shapes where they serve its one duty, and offers no consent screens, delegated grants or tokens for other services.
@@ -86,7 +87,7 @@ They are not weighted, and they do not collapse.
 
 **Exposure.**\
 Nothing a hub accepts is worth stealing twice.\
-The measure is that no admission key admits a second connection, a leaked key admits at most one within its minute, and a standing code - the one lasting secret, held only by a machine's own connection holder - stops yielding keys the moment it is revoked.
+The measure is that no admission key admits a second connection, a leaked key nobody has used admits at most one within its minute, and a standing code - the one lasting secret, kept by the issuer only as a hash and presented only by a machine's own connection holder - stops yielding keys the moment its revocation is recorded.
 
 **Unity.**\
 Every client reaches a hub the same way.\
