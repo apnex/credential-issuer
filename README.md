@@ -3,7 +3,7 @@
 Issue the credentials a caller presents to reach a hub, from authority the host accepts.
 
 **Status: no code yet.**\
-Its vision is drafted and awaits ratification, and its contract is drafted; its design is owed.
+Its vision is ratified (zorg's `D40`) and its contract is drafted; its design is owed.
 
 - `VISION.md` - why it exists, and what it will never be.
 - `CONTRACT.md` - what a consumer can depend on, one capability per row.

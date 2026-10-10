@@ -19,3 +19,14 @@ Its shapes follow OAuth 2.0's wherever one fits and is cheap (zorg's `D39`).
 
 **Why.**\
 It holds no application's content, so it is a shared component even while no application has built it (zorg's `D35`), and zorg's command line, zorg's web canvas and drawv2 all need it (zorg's `D38`).
+
+---
+
+## D2 - The vision is ratified
+
+**Ruled by:** the director, 2026-10-10 (zorg's `D40`).\
+**Affects:** `VISION.md`.
+
+**Ruling.**\
+The vision is ratified at `924a935`, after two rounds of cold reading by two model families, and its status line says so.\
+From here it changes only by a recorded decision, absorbed into it.

@@ -1,12 +1,11 @@
 # credential-issuer - Vision
 
-**Status: drafted 2026-10-10 under zorg's `D35`, `D38` and `D39`; not ratified.**\
+**Status: ratified by the director, 2026-10-10 (zorg's `docs/DECISIONS.md`, `D40`); enduring.**\
 This document states why credential-issuer exists and what it will never be.\
 It carries no current state, no roadmap, and no schedule.
 
 Holding this document authorises nothing.\
 It does not ratify a decision, admit a component to any registry, or approve a contract change.\
-Until the director ratifies it, it is a proposal, and nothing may cite it as enduring.\
 A change of direction is recorded as a decision first and absorbed here afterwards.
 
 ---
