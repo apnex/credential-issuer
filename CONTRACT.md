@@ -67,10 +67,18 @@ Their designs are kept with zorg's evaluation records, outside this repository.
 - caller-identity verifies at the issuer, the sign-in or the code, and at the hub, the key; it issues at neither.
 - After a restart, the redeemer refuses every key issued before it last started, so no key can be used twice across a restart, at the cost of one more key for a client caught mid-connection; no record of used keys is kept on disk.
 
+**Settled with AGP's review (zorg's `D47`).**
+
+- A key is spent once the binding verifies it, even if opening, collision selection or establishment then fails; the client discards it and fetches a fresh key, never assuming whether an interrupted redemption committed.
+- A key's lifetime bounds its redemption; establishment is bounded by AGP's opening time-out, so leaked unused material admits no later than the lifetime, plus the clock tolerance and the largest clock difference accepted - both zero where issuer and redeemer share a process - plus that time-out.
+- An explicit refusal from the issuer stops redialling until the proof changes and reaches commands as `admission-refused`; a failure the transport cannot classify is retried under AGP's backoff.
+- One redeemer serves one hub audience in one process; several processes accepting one audience need a shared atomic record of used keys, outside the first version.
+- A key binds its allowed proof mode, principal, issuer, hub, node and redemption identity in the issuer's and redeemer's trusted state; a pre-shared-key path's public identity is never enough for bearer admission or for a reuse to close a session.
+
 **Differed, to be settled.**
 
 - How a browser carries a key: at the `wss:` upgrade, in a second protocol value beside AGP's own, or in an exchange inside the protected channel before admission using OAuth's bearer mechanism over SASL (RFC 7628); AGP owns that contract, and the experiments agreed with AGP decide.
-- Where the single-use check sits: at AGP's identity-admission port, where the session is known, or in the transport binding, bound to the session at its opening.
+- Where the single-use check sits: at AGP's identity-admission port, where the session is known, or in the transport binding, bound to the session afterwards by an exact association; AGP's review prefers the second, conditional on a bounded, incarnation-safe handoff, and the joint lifecycle design decides.
 - The request evidence an admitted key gives: caller-identity's `agp-session` record with `proved` `true`, or a new variant naming the issuer.
 - The key's format: an opaque handle looked up in memory where the issuer and hub share a process, and an RFC 9068 token where they do not.
 
