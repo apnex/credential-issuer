@@ -70,9 +70,11 @@ Their designs are kept with zorg's evaluation records, outside this repository.
 **Settled with AGP's review (zorg's `D47`).**
 
 - A key is spent once the binding verifies it, even if opening, collision selection or establishment then fails; the client discards it and fetches a fresh key, never assuming whether an interrupted redemption committed.
-- A key's lifetime bounds its redemption; establishment is bounded by AGP's opening time-out, so leaked unused material admits no later than the lifetime, plus the clock tolerance and the largest clock difference accepted - both zero where issuer and redeemer share a process - plus that time-out.
+- A key's lifetime bounds its redemption; establishment is bounded by the hub's deadline from redemption, below, so leaked unused material admits no later than the lifetime, plus the clock tolerance and the largest clock difference accepted - both zero where issuer and redeemer share a process - plus that time-out.
 - An explicit refusal from the issuer stops redialling until the proof changes and reaches commands as `admission-refused`; a failure the transport cannot classify is retried under AGP's backoff.
-- One redeemer serves one hub audience in one process; several processes accepting one audience need a shared atomic record of used keys, outside the first version.
+- One redeemer serves one hub audience in one process, which several listeners may share; independently held redemption state for one audience needs a distributed design, outside the first version.
+- A key carries the issuing generation - a value the issuer and redeemer choose fresh each time their process starts - and the redeemer accepts only its own generation, so restart refusal compares no monotonic times from two process lifetimes.
+- From a key's redemption, one absolute deadline owned by the hub's binding bounds the rest of the handshake, the channel's handoff and AGP's opening, and is handed to AGP as the opening's deadline; an authentication slot that ends on admission, failure or that deadline moves any socket or work still unreleased into a finite retained-resource budget until it is released (AGP's response, `upstream/agp-review-response.md` in zorg).
 - A key binds its allowed proof mode, principal, issuer, hub, node and redemption identity in the issuer's and redeemer's trusted state; a pre-shared-key path's public identity is never enough for bearer admission or for a reuse to close a session.
 
 **Differed, to be settled.**
