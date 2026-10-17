@@ -67,7 +67,7 @@ Their designs are kept with zorg's evaluation records, outside this repository.
 - caller-identity verifies at the issuer, the sign-in or the code, and at the hub, the key; it issues at neither.
 - After a restart, the redeemer refuses every key issued before it last started, so no key can be used twice across a restart, at the cost of one more key for a client caught mid-connection; no record of used keys is kept on disk.
 
-**Settled with AGP's review (zorg's `D47`).**
+**Settled with AGP's review (zorg's `D47`, `D59`).**
 
 - A key is spent once the binding verifies it, even if opening, collision selection or establishment then fails; the client discards it and fetches a fresh key, never assuming whether an interrupted redemption committed.
 - A key's lifetime bounds its redemption; establishment is bounded by the hub's deadline from redemption, below, so leaked unused material admits no later than the lifetime, plus the clock tolerance and the largest clock difference accepted - both zero where issuer and redeemer share a process - plus that time-out.
@@ -76,6 +76,7 @@ Their designs are kept with zorg's evaluation records, outside this repository.
 - A key carries the issuing generation - a value the issuer and redeemer choose fresh each time their process starts - and the redeemer accepts only its own generation, so restart refusal compares no monotonic times from two process lifetimes.
 - From a key's redemption, one absolute deadline owned by the hub's binding bounds the rest of the handshake, the channel's handoff and AGP's opening, and is handed to AGP as the opening's deadline; an authentication slot that ends on admission, failure or that deadline moves any socket or work still unreleased into a finite retained-resource budget until it is released (AGP's response, `upstream/agp-review-response.md` in zorg).
 - A key binds its allowed proof mode, principal, issuer, hub, node and redemption identity in the issuer's and redeemer's trusted state; a pre-shared-key path's public identity is never enough for bearer admission or for a reuse to close a session.
+- Under zorg's `D59` (`upstream/agp-reply-isolation-reply.md`), when `admission-key-verifier` accepts a key at the hub, its proved `principal` and `issuer` form the session's immutable `{issuer, principal}` authorization association that `caller-identity` supplies to AGP at admission; across reconnects, the same proxy or browser worker node (`<identity>.<16-hex instance tag>`) dials with a fresh key (`fresh-key-per-dial`) bound to that same `(issuer, principal, hub, node)`, so its replacement channel receives the equal association at admission and can carry pending direct-peer replies without consulting mutable session history.
 
 **Differed, to be settled.**
 
