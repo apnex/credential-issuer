@@ -253,18 +253,34 @@ test("CIss4, CI2, CI6, D10-E2: verifyRedeemed dual redemptionId + exact lifecycl
 	);
 	assert.equal(agpSnapReports[0].firstSession, "agp-session-42");
 
-	// Malformed readAdmissionUse return (getter or unknown field) retains the lease
-	snapObs = { state: "terminal", extraField: true };
-	agpSnapClock.advance(20);
-	agpSnapIssuer.sweepLeases();
-	assert.deepEqual(
-		await agpSnapIssuer.issueAdmissionKey({
-			proof: { kind: "sign-in", token: "alice-token" },
-			hub: "zorg-hub",
-			node: "alice.0123456789abcdef",
-		}),
-		{ ok: false, code: "node-identity-conflict" },
-	);
+	// Malformed readAdmissionUse return (getter, unknown field, reachedEstablished: true without admittedSession,
+	// admittedSession: null, or invalid authorizationAssociation) retains the lease (Attempt 2 F1)
+	for (const badTerminal of [
+		{ state: "terminal", extraField: true },
+		{ state: "terminal", reachedEstablished: true },
+		{ state: "terminal", reachedEstablished: false, admittedSession: null },
+		{
+			state: "terminal",
+			reachedEstablished: true,
+			admittedSession: {
+				remoteNodeId: "alice.0123456789abcdef",
+				localSessionId: "s-bad",
+				authorizationAssociation: 42,
+			},
+		},
+	]) {
+		snapObs = badTerminal;
+		agpSnapClock.advance(20);
+		agpSnapIssuer.sweepLeases();
+		assert.deepEqual(
+			await agpSnapIssuer.issueAdmissionKey({
+				proof: { kind: "sign-in", token: "alice-token" },
+				hub: "zorg-hub",
+				node: "alice.0123456789abcdef",
+			}),
+			{ ok: false, code: "node-identity-conflict" },
+		);
+	}
 
 	// Valid AGP { state: "terminal", reachedEstablished: false } reclaims the lease after grace (5ms)
 	snapObs = { state: "terminal", reachedEstablished: false };

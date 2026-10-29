@@ -85,6 +85,8 @@ interface InternalKeyRecord {
 	reservationHeld: boolean;
 	firstUse: InternalUseSlot | null;
 	firstUseSummary: { readonly useId: string; readonly sessionId: string | null } | null;
+	readonly committedLifecycles: WeakSet<object>;
+	readonly uncertainLifecycles: WeakSet<object>;
 	readonly refusedReuseLifecycles: WeakSet<object>;
 }
 
@@ -337,8 +339,7 @@ function readRedemptionOutcome(
 }
 
 /** Validates an AGP `AdmissionSessionIdentity` plain object and extracts `localSessionId` (`F1`). */
-function extractSessionIdFromIdentity(sessionObj: unknown): string | null | "invalid" {
-	if (sessionObj === undefined) return null;
+function extractSessionIdFromIdentity(sessionObj: unknown): string | "invalid" {
 	if (typeof sessionObj !== "object" || sessionObj === null || Array.isArray(sessionObj)) return "invalid";
 	const rec = sessionObj as Record<string, unknown>;
 	for (const k of Object.keys(rec)) {
@@ -348,6 +349,26 @@ function extractSessionIdFromIdentity(sessionObj: unknown): string | null | "inv
 	}
 	if (!isValidBoundedIdentifier(rec.remoteNodeId) || !isValidBoundedIdentifier(rec.localSessionId)) {
 		return "invalid";
+	}
+	if ("authorizationAssociation" in rec && rec.authorizationAssociation !== undefined) {
+		const assoc = rec.authorizationAssociation;
+		if (typeof assoc !== "object" || assoc === null || Array.isArray(assoc)) return "invalid";
+		const assocRec = assoc as Record<string, unknown>;
+		const assocKeys = Object.keys(assocRec);
+		if (assocRec.mode === "unauthenticated") {
+			if (assocKeys.length !== 1) return "invalid";
+		} else if (assocRec.mode === "authenticated") {
+			if (
+				assocKeys.length !== 4 ||
+				!isValidIssuer(assocRec.issuer) ||
+				!isValidBoundedIdentifier(assocRec.principal) ||
+				!isValidBoundedIdentifier(assocRec.instanceBinding)
+			) {
+				return "invalid";
+			}
+		} else {
+			return "invalid";
+		}
 	}
 	return rec.localSessionId;
 }
@@ -555,21 +576,23 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			if (!isValidBoundedIdentifier(obj.sessionId)) return "unknown";
 			sessionId = obj.sessionId;
 		}
-		if ("session" in obj && obj.session !== undefined && obj.session !== null) {
+		if ("session" in obj) {
 			if (state !== "admitted" && state !== "established") return "unknown";
 			const extracted = extractSessionIdFromIdentity(obj.session);
 			if (extracted === "invalid") return "unknown";
-			if (extracted !== null) sessionId = extracted;
+			sessionId = extracted;
 		}
-		if ("admittedSession" in obj && obj.admittedSession !== undefined && obj.admittedSession !== null) {
+		let hasValidAdmittedSession = false;
+		if ("admittedSession" in obj) {
 			if (state !== "terminal") return "unknown";
 			const extracted = extractSessionIdFromIdentity(obj.admittedSession);
 			if (extracted === "invalid") return "unknown";
-			if (extracted !== null) sessionId = extracted;
+			hasValidAdmittedSession = true;
+			sessionId = extracted;
 		}
-		if ("reachedEstablished" in obj && obj.reachedEstablished !== undefined) {
+		if ("reachedEstablished" in obj) {
 			if (state !== "terminal" || typeof obj.reachedEstablished !== "boolean") return "unknown";
-			if (obj.reachedEstablished === true && "admittedSession" in obj && obj.admittedSession === undefined) {
+			if (obj.reachedEstablished === true && !hasValidAdmittedSession) {
 				return "unknown";
 			}
 		}
@@ -1033,6 +1056,28 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 
 		sweepLeases();
 
+		// Re-verify proof liveness after sweepLeases() in case lifecycle polling/reflection advanced the clock (F5).
+		const nowAtIssue = clock.now();
+		if (proofKind === "sign-in") {
+			if (verifiedExpiresAt !== null && !(nowAtIssue < verifiedExpiresAt)) {
+				return Object.freeze({ ok: false, code: "proof-refused" });
+			}
+		} else {
+			if (storeQuarantined) {
+				return Object.freeze({ ok: false, code: "code-store-unwritable" });
+			}
+			const recAfterSweep = codesByHash.get(codeHashForCommit!);
+			const nowWallAfterSweep = wallClock.nowMs();
+			if (
+				recAfterSweep === undefined ||
+				recAfterSweep.revokedAtMs !== null ||
+				(recAfterSweep.expiresAtMs !== null && nowWallAfterSweep >= recAfterSweep.expiresAtMs) ||
+				recAfterSweep.identity !== parsedNode.identity
+			) {
+				return Object.freeze({ ok: false, code: "proof-refused" });
+			}
+		}
+
 		if (retainedKeys.size >= maxRetainedKeys) {
 			return Object.freeze({ ok: false, code: "lease-capacity" });
 		}
@@ -1047,7 +1092,6 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 
 		const lKey = leaseKey(hub, request.node);
 		let lease = activeLeases.get(lKey);
-		const nowAtIssue = clock.now();
 		let returnedContinuationSecret: string;
 
 		if (lease !== undefined) {
@@ -1119,6 +1163,8 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			reservationHeld: true,
 			firstUse: null,
 			firstUseSummary: null,
+			committedLifecycles: new WeakSet(),
+			uncertainLifecycles: new WeakSet(),
 			refusedReuseLifecycles: new WeakSet(),
 		};
 		lease.keys.set(redemptionId, keyRec);
@@ -1224,7 +1270,7 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			return "refused";
 		}
 
-		// 1. Existing use.lifecycle registration check first (CIss3 step 1, o:F2, o:F4).
+		// 1. Existing use.lifecycle registration check first (CIss3 step 1, o:F2, o:F4, F8).
 		const existingSlot = slotsByLifecycle.get(use.lifecycle);
 		if (existingSlot !== undefined) {
 			if (existingSlot.redemptionId === keyRec.redemptionId) {
@@ -1232,16 +1278,17 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			}
 			return "refused";
 		}
-		if (keyRec.refusedReuseLifecycles.has(use.lifecycle)) {
+		if (keyRec.committedLifecycles.has(use.lifecycle)) {
+			return "redeemed";
+		}
+		if (keyRec.uncertainLifecycles.has(use.lifecycle) || keyRec.refusedReuseLifecycles.has(use.lifecycle)) {
 			return "refused";
 		}
 
-		// 2. Second presentation / key reuse check (CIss3 step 2, o:F2, o:F3, o:F6, F1, F4).
+		// 2. Second presentation / key reuse check (CIss3 step 2, o:F2, o:F3, o:F6, F1, F4, F6).
 		if (keyRec.state === "spent" || keyRec.state === "uncertain") {
 			keyRec.refusedReuseLifecycles.add(use.lifecycle);
 			const secondUseId = `${generation}-use-${++nextUseId}`;
-			const nowMs = clock.now();
-			const live = nowMs < keyRec.validBeforeMonotonicMs;
 			let firstSession: string | null = keyRec.firstUseSummary?.sessionId ?? null;
 			if (keyRec.firstUse !== null) {
 				const obs = readUseObservation(keyRec.firstUse.lifecycle);
@@ -1254,6 +1301,9 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 					});
 				}
 			}
+			// Sample clock AFTER readUseObservation so an observation that crosses expiry never authorizes termination (F6).
+			const nowMs = clock.now();
+			const live = nowMs < keyRec.validBeforeMonotonicMs;
 			let firstSessionStopped = false;
 			if (live && keyRec.firstUse !== null) {
 				const firstControl = keyRec.firstUse.control;
@@ -1333,6 +1383,7 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			observePromises(error);
 			slot.state = "uncertain";
 			keyRec.state = "uncertain";
+			keyRec.uncertainLifecycles.add(use.lifecycle);
 			keyRec.firstUse = slot;
 			keyRec.firstUseSummary = Object.freeze({ useId, sessionId: null });
 			callVoidHook(() => use.control.requestAdmissionTermination());
@@ -1343,6 +1394,7 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 		if (parsedOutcome.outcome === "recorded") {
 			slot.state = "committed";
 			keyRec.state = "spent";
+			keyRec.committedLifecycles.add(use.lifecycle);
 			keyRec.firstUse = slot;
 			const initialObs = readUseObservation(use.lifecycle);
 			const initialSessionId = initialObs !== "unknown" ? initialObs.sessionId : null;
@@ -1365,6 +1417,7 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 
 		slot.state = "uncertain";
 		keyRec.state = "uncertain";
+		keyRec.uncertainLifecycles.add(use.lifecycle);
 		keyRec.firstUse = slot;
 		keyRec.firstUseSummary = Object.freeze({ useId, sessionId: null });
 		callVoidHook(() => use.control.requestAdmissionTermination());

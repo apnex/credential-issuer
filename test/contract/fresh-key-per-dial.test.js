@@ -23,6 +23,9 @@ function createTestClock(initialMs = 1_000_000) {
 		advance: (ms) => {
 			nowMs += ms;
 		},
+		set: (ms) => {
+			nowMs = ms;
+		},
 		schedule: () => ({ cancel() {} }),
 	};
 }
@@ -206,6 +209,137 @@ test("CIss5, A3, D10-E2: createCredentialPresenterTarget composes with issuer.is
 	await attemptDeepSnap.dispose();
 	assert.equal(seenTokenAssertion, "original", "captured sign-in token snapshot is deeply immutable");
 	assert.equal(resDeepSnap.kind, "issuer-unavailable", "mutated current proof supersedes the captured proof");
+
+	// 7) Reentrant attempt.dispose() inside issueKey waits for issueKey's Promise to settle before releasing permit (Attempt 2 F2),
+	// single-read createdSocket.closed accessor is captured once (Attempt 2 F3), getProof() throws/extra rejected Promises are observed (Attempt 2 F4),
+	// and issueKey response reflection advancing clock to >= validBeforeMonotonicMs returns issuer-unavailable (Attempt 2 F7)
+	let reentrantReleased = 0;
+	let resolvePendingIssue;
+	let currentAttempt;
+	const reentrantPresenter = createCredentialPresenterTarget({
+		hub: "zorg-hub",
+		node: "alice.0123456789abcdef",
+		clock,
+		getProof: () => ({ kind: "sign-in", token: "alice-token" }),
+		issueKey() {
+			void currentAttempt.dispose();
+			return new Promise((r) => {
+				resolvePendingIssue = () => r({ ok: false, code: "proof-refused" });
+			});
+		},
+		connectWithKey: async () => ({}),
+	});
+	currentAttempt = reentrantPresenter.createCredentialAttempt(undefined, {
+		releaseUnused() {
+			reentrantReleased += 1;
+		},
+	});
+	const reentrantPrep = currentAttempt.prepareCredential();
+	await new Promise((r) => setImmediate(r));
+	assert.equal(reentrantReleased, 0, "reentrant dispose inside issueKey must wait until issueKey settles");
+	resolvePendingIssue();
+	await reentrantPrep;
+	await currentAttempt.dispose();
+	assert.equal(reentrantReleased, 1);
+
+	// Single-read createdSocket.closed accessor (Attempt 2 F3)
+	let f3Released = 0;
+	let f3ClosedReads = 0;
+	let resolveF3Close;
+	const f3ClosePromise = new Promise((r) => {
+		resolveF3Close = r;
+	});
+	const f3Presenter = createCredentialPresenterTarget({
+		hub: "zorg-hub",
+		node: "alice.0123456789abcdef",
+		clock,
+		getProof: () => currentProof,
+		issueKey: (req) => issuer.issueAdmissionKey(req),
+		connectWithKey: async () => ({
+			socket: {
+				close() {},
+				get closed() {
+					f3ClosedReads += 1;
+					return f3ClosedReads === 1 ? f3ClosePromise : undefined;
+				},
+			},
+			transferred: false,
+		}),
+	});
+	f3Presenter.setContinuationSecret(presenter.getContinuationSecret());
+	const f3Attempt = f3Presenter.createCredentialAttempt(undefined, {
+		releaseUnused() {
+			f3Released += 1;
+		},
+	});
+	const f3Prep = await f3Attempt.prepareCredential();
+	await f3Prep.connection.connect();
+	const f3Disp = f3Attempt.dispose();
+	await new Promise((r) => setImmediate(r));
+	assert.equal(f3ClosedReads, 1, "createdSocket.closed is read only once");
+	assert.equal(f3Released, 0, "waits for the captured native close Promise");
+	resolveF3Close();
+	await f3Disp;
+	assert.equal(f3Released, 1);
+
+	// Constructor getProof() throwing or returning extra rejected Promise observes the rejection (Attempt 2 F4)
+	for (const badGetProof of [
+		() => {
+			throw { nested: Promise.reject(new Error("D55 getProof throw rejection")) };
+		},
+		() => ({ kind: "sign-in", token: "ok", extra: Promise.reject(new Error("D55 getProof extra rejection")) }),
+	]) {
+		const f4Presenter = createCredentialPresenterTarget({
+			hub: "zorg-hub",
+			node: "alice.0123456789abcdef",
+			clock,
+			getProof: badGetProof,
+			issueKey: () => ({ ok: false, code: "proof-refused" }),
+			connectWithKey: async () => ({}),
+		});
+		assert.throws(() => f4Presenter.createCredentialAttempt(undefined, { releaseUnused() {} }));
+	}
+	await new Promise((r) => setImmediate(r));
+
+	// Response reflection advancing clock to >= validBeforeMonotonicMs returns issuer-unavailable (Attempt 2 F7)
+	for (const endAt of [109, 110, 111]) {
+		const f7Clock = createTestClock(100);
+		const f7Presenter = createCredentialPresenterTarget({
+			hub: "zorg-hub",
+			node: "alice.0123456789abcdef",
+			clock: f7Clock,
+			getProof: () => ({ kind: "sign-in", token: "alice-token" }),
+			issueKey: () =>
+				new Proxy(
+					{
+						ok: true,
+						redemptionId: "g1-1",
+						pskIdentity: "g1-1",
+						secretHex: "ab".repeat(32),
+						bearerToken: "ci_key_g1-1",
+						proofMode: "native-tls13-external-psk-v1",
+						issuer: "zorg-signin",
+						principal: "alice",
+						hub: "zorg-hub",
+						node: "alice.0123456789abcdef",
+						instanceBinding: "g1-1",
+						continuationSecret: "ci_cont_1",
+						validBeforeMonotonicMs: 110,
+					},
+					{
+						ownKeys(t) {
+							f7Clock.set(endAt);
+							return Reflect.ownKeys(t);
+						},
+					},
+				),
+			connectWithKey: async () => ({}),
+		});
+		const f7Attempt = f7Presenter.createCredentialAttempt(undefined, { releaseUnused() {} });
+		const f7Res = await f7Attempt.prepareCredential();
+		assert.equal(f7Res.kind, endAt < 110 ? "prepared" : "issuer-unavailable");
+		await f7Attempt.dispose();
+	}
 });
 
 test("CIss5, A3, A4, D10-E2: classification of issuer-unavailable vs issuer-refused (with nothing dialled), plain-JSON secretHex boundary validation, and observeAdjacencyRefusal subscribe-before-read and generation >= receipt.generation rearming", async () => {

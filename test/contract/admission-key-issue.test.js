@@ -375,4 +375,49 @@ test("CIss2, D10-E2: isSignInRevoked rechecked at serialized commit, lease/handl
 		}),
 		{ ok: false, code: "policy-refused" },
 	);
+
+	// 4) Sign-in proof expiring during sweepLeases() lifecycle observation is refused as proof-refused (Attempt 2 F5)
+	for (const endAt of [109, 110, 111]) {
+		const sweepExpClock = createTestClock(100);
+		let advanceInSweep = false;
+		const sweepExpIssuer = createCredentialIssuer({
+			hub: "zorg-hub",
+			verifiers: [{ issuer: "authority-a", verify: () => ({ principal: "alice", session: "s1", expiresAt: 110 }) }],
+			clock: sweepExpClock,
+		});
+		const firstKey = await sweepExpIssuer.issueAdmissionKey({
+			proof: { kind: "sign-in", token: "alice-a" },
+			hub: "zorg-hub",
+			node: "alice.0000000000000001",
+		});
+		const arr = {};
+		const look = sweepExpIssuer.resolvePsk(firstKey.pskIdentity, { arrival: arr });
+		sweepExpIssuer.completePskProof(
+			{
+				arrival: arr,
+				use: {
+					lifecycle: {
+						readAdmissionUse() {
+							if (advanceInSweep) sweepExpClock.set(endAt);
+							return { state: "established", sessionId: "s-1" };
+						},
+					},
+					control: { requestAdmissionTermination() {} },
+					redemption: { recordAdmissionRedemption: () => ({ kind: "recorded" }) },
+				},
+			},
+			{ arrival: arr, lookupRef: look.lookupRef },
+		);
+		advanceInSweep = true;
+		const secondKey = await sweepExpIssuer.issueAdmissionKey({
+			proof: { kind: "sign-in", token: "alice-a" },
+			hub: "zorg-hub",
+			node: "alice.0000000000000002",
+		});
+		if (endAt < 110) {
+			assert.equal(secondKey.ok, true);
+		} else {
+			assert.deepEqual(secondKey, { ok: false, code: "proof-refused" });
+		}
+	}
 });

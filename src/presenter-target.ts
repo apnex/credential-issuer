@@ -66,54 +66,77 @@ async function settleNativePromiseOrValue(raw: unknown): Promise<{ readonly ok: 
 	});
 }
 
-/** Reads and deeply snapshots a `ClientPrimaryProof` via own enumerable data descriptors and `readPlainJson` (`CIss5`, `F6`). */
+/** Reads and deeply snapshots a `ClientPrimaryProof` via own enumerable data descriptors and `readPlainJson` (`CIss5`, `F4`, `F6`). */
 function snapshotPrimaryProof(raw: unknown): ClientPrimaryProof {
-	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-		throw new TypeError("getProof() must return a plain object { kind: \"sign-in\", token } or { kind: \"standing-code\", code }");
-	}
-	const proto = Object.getPrototypeOf(raw);
-	if (proto !== Object.prototype && proto !== null) {
-		throw new TypeError("getProof() must return a plain object");
-	}
-	if (Object.getOwnPropertySymbols(raw).length > 0) {
-		throw new TypeError("getProof() result must not carry symbol properties");
-	}
-	const names = Object.getOwnPropertyNames(raw);
-	if (names.length !== 2) {
-		throw new TypeError("getProof() result must have exactly two own properties");
-	}
-	const kindDesc = Object.getOwnPropertyDescriptor(raw, "kind");
-	if (kindDesc === undefined || !kindDesc.enumerable || !Object.hasOwn(kindDesc, "value")) {
-		throw new TypeError("getProof() result must have an own enumerable data property kind");
-	}
-	if (kindDesc.value === "sign-in") {
-		const tokenDesc = Object.getOwnPropertyDescriptor(raw, "token");
-		if (tokenDesc === undefined || !tokenDesc.enumerable || !Object.hasOwn(tokenDesc, "value")) {
-			throw new TypeError("sign-in proof must have an own enumerable data property token");
+	const captured: unknown[] = [raw];
+	const failProof = (message: string): never => {
+		for (const item of captured) observePromises(item);
+		throw new TypeError(message);
+	};
+	try {
+		if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+			return failProof("getProof() must return a plain object { kind: \"sign-in\", token } or { kind: \"standing-code\", code }");
 		}
-		if (tokenDesc.value === undefined || tokenDesc.value === null) {
-			throw new TypeError("sign-in proof token must not be null or undefined");
+		const proto = Object.getPrototypeOf(raw);
+		if (proto !== Object.prototype && proto !== null) {
+			return failProof("getProof() must return a plain object");
 		}
-		const tokenPlain = readPlainJson(tokenDesc.value);
-		if (!tokenPlain.ok || tokenPlain.value === null) {
-			throw new TypeError("sign-in proof token must be a non-null plain JSON value");
+		if (Object.getOwnPropertySymbols(raw).length > 0) {
+			return failProof("getProof() result must not carry symbol properties");
 		}
-		return Object.freeze({ kind: "sign-in", token: tokenPlain.value });
+		const names = Object.getOwnPropertyNames(raw);
+		for (const name of names) {
+			const desc = Object.getOwnPropertyDescriptor(raw, name);
+			if (desc !== undefined && Object.hasOwn(desc, "value")) {
+				captured.push(desc.value);
+			}
+			if (desc === undefined || !desc.enumerable || !Object.hasOwn(desc, "value")) {
+				return failProof("getProof() properties must be own enumerable data descriptors");
+			}
+		}
+		if (names.length !== 2) {
+			return failProof("getProof() result must have exactly two own properties");
+		}
+		const kindDesc = Object.getOwnPropertyDescriptor(raw, "kind");
+		if (kindDesc === undefined || !kindDesc.enumerable || !Object.hasOwn(kindDesc, "value")) {
+			return failProof("getProof() result must have an own enumerable data property kind");
+		}
+		if (kindDesc.value === "sign-in") {
+			const tokenDesc = Object.getOwnPropertyDescriptor(raw, "token");
+			if (tokenDesc === undefined || !tokenDesc.enumerable || !Object.hasOwn(tokenDesc, "value")) {
+				return failProof("sign-in proof must have an own enumerable data property token");
+			}
+			if (tokenDesc.value === undefined || tokenDesc.value === null) {
+				return failProof("sign-in proof token must not be null or undefined");
+			}
+			const tokenPlain = readPlainJson(tokenDesc.value);
+			if (!tokenPlain.ok || tokenPlain.value === null) {
+				return failProof("sign-in proof token must be a non-null plain JSON value");
+			}
+			return Object.freeze({ kind: "sign-in", token: tokenPlain.value });
+		}
+		if (kindDesc.value === "standing-code") {
+			const codeDesc = Object.getOwnPropertyDescriptor(raw, "code");
+			if (
+				codeDesc === undefined ||
+				!codeDesc.enumerable ||
+				!Object.hasOwn(codeDesc, "value") ||
+				typeof codeDesc.value !== "string" ||
+				codeDesc.value.length === 0
+			) {
+				return failProof("standing-code proof must have a non-empty string code");
+			}
+			return Object.freeze({ kind: "standing-code", code: codeDesc.value });
+		}
+		return failProof("getProof() kind must be \"sign-in\" or \"standing-code\"");
+	} catch (error) {
+		if (error instanceof TypeError && captured.includes(raw)) {
+			for (const item of captured) observePromises(item);
+			throw error;
+		}
+		captured.push(error);
+		return failProof("getProof() threw or failed descriptor inspection");
 	}
-	if (kindDesc.value === "standing-code") {
-		const codeDesc = Object.getOwnPropertyDescriptor(raw, "code");
-		if (
-			codeDesc === undefined ||
-			!codeDesc.enumerable ||
-			!Object.hasOwn(codeDesc, "value") ||
-			typeof codeDesc.value !== "string" ||
-			codeDesc.value.length === 0
-		) {
-			throw new TypeError("standing-code proof must have a non-empty string code");
-		}
-		return Object.freeze({ kind: "standing-code", code: codeDesc.value });
-	}
-	throw new TypeError("getProof() kind must be \"sign-in\" or \"standing-code\"");
 }
 
 function samePrimaryProof(a: ClientPrimaryProof, b: ClientPrimaryProof): boolean {
@@ -128,13 +151,13 @@ function samePrimaryProof(a: ClientPrimaryProof, b: ClientPrimaryProof): boolean
 }
 
 /**
- * Reads the result of `issueKey` across the plain-JSON / in-process `Uint8Array(32)` boundary (`o:F1`, `F5`, `D54`, `D55`).
+ * Reads the result of `issueKey` across the plain-JSON / in-process `Uint8Array(32)` boundary (`o:F1`, `F5`, `F7`, `D54`, `D55`).
  */
 function readIssueKeyResult(
 	raw: unknown,
 	expectedHub: string,
 	expectedNode: string,
-	nowMs: number,
+	clock: ClockPort,
 ):
 	| {
 			readonly kind: "ok";
@@ -277,7 +300,8 @@ function readIssueKeyResult(
 			return failUnavailable("missing-psk-secret");
 		}
 
-		if (!(nowMs < validBeforeMonotonicMs)) {
+		// Sample clock AFTER all response reflection and validation completes (F7).
+		if (!(clock.now() < validBeforeMonotonicMs)) {
 			return failUnavailable("expired-key");
 		}
 
@@ -370,7 +394,14 @@ export function createCredentialPresenterTarget(
 					throw new TypeError("request.node does not match presenter node");
 				}
 			}
-			const capturedProof = snapshotPrimaryProof(getProof());
+			let rawProof: unknown;
+			try {
+				rawProof = getProof();
+			} catch (proofError) {
+				observePromises(proofError);
+				throw proofError;
+			}
+			const capturedProof = snapshotPrimaryProof(rawProof);
 			const capturedContinuation = continuationSecret;
 
 			let prepareStarted = false;
@@ -418,144 +449,146 @@ export function createCredentialPresenterTarget(
 					return Promise.resolve(Object.freeze({ kind: "issuer-unavailable", reason: "disposed-or-aborted" }));
 				}
 				prepareStarted = true;
+				let resolveInFlightPrepare!: () => void;
+				// Establish inFlightPrepare BEFORE invoking issueKey so reentrant attempt.dispose() inside issueKey waits (F2).
+				inFlightPrepare = new Promise<void>((resolve) => {
+					resolveInFlightPrepare = resolve;
+				});
 
 				const runPrepare = async (): Promise<PrepareCredentialResult> => {
-					const issueReq: IssueAdmissionKeyRequest = capturedProof.kind === "sign-in"
-						? Object.freeze({
-								grantType: "urn:ietf:params:oauth:grant-type:token-exchange" as const,
-								subjectToken: capturedProof.token,
-								hub,
-								node,
-								proofMode,
-								...(capturedContinuation !== null ? { continuationSecret: capturedContinuation } : {}),
-						  })
-						: Object.freeze({
-								grantType: "client_credentials" as const,
-								clientSecret: capturedProof.code,
-								hub,
-								node,
-								proofMode,
-								...(capturedContinuation !== null ? { continuationSecret: capturedContinuation } : {}),
-						  });
-
-					let raw: unknown;
 					try {
-						raw = issueKey(issueReq, signal);
-					} catch (error) {
-						observePromises(error);
-						return Object.freeze({ kind: "issuer-unavailable", reason: "issue-key-threw" });
-					}
-					const settled = await settleNativePromiseOrValue(raw);
-					if (!settled.ok) {
-						return Object.freeze({ kind: "issuer-unavailable", reason: "issue-key-rejected" });
-					}
-					if (disposed || signal?.aborted === true) {
-						observePromises(settled.value);
-						return Object.freeze({ kind: "issuer-unavailable", reason: "disposed-or-aborted" });
-					}
+						const issueReq: IssueAdmissionKeyRequest = capturedProof.kind === "sign-in"
+							? Object.freeze({
+									grantType: "urn:ietf:params:oauth:grant-type:token-exchange" as const,
+									subjectToken: capturedProof.token,
+									hub,
+									node,
+									proofMode,
+									...(capturedContinuation !== null ? { continuationSecret: capturedContinuation } : {}),
+							  })
+							: Object.freeze({
+									grantType: "client_credentials" as const,
+									clientSecret: capturedProof.code,
+									hub,
+									node,
+									proofMode,
+									...(capturedContinuation !== null ? { continuationSecret: capturedContinuation } : {}),
+							  });
 
-					const parsed = readIssueKeyResult(settled.value, hub, node, clock.now());
-					if (parsed.kind === "unavailable") {
-						return Object.freeze({ kind: "issuer-unavailable", reason: parsed.reason });
-					}
-					if (parsed.kind === "refused") {
-						if (parsed.code === "node-identity-conflict" && continuationSecret === capturedContinuation) {
-							continuationSecret = null;
-						}
-						// Only classify as issuer-refused if the captured proof is still the current primary proof (A3).
-						let stillCurrentProof = false;
+						let raw: unknown;
 						try {
-							const currentProof = snapshotPrimaryProof(getProof());
-							stillCurrentProof = samePrimaryProof(capturedProof, currentProof);
-						} catch (err) {
-							observePromises(err);
-							stillCurrentProof = false;
+							raw = issueKey(issueReq, signal);
+						} catch (error) {
+							observePromises(error);
+							return Object.freeze({ kind: "issuer-unavailable", reason: "issue-key-threw" });
 						}
-						if (!stillCurrentProof) {
-							return Object.freeze({ kind: "issuer-unavailable", reason: "proof-superseded" });
+						const settled = await settleNativePromiseOrValue(raw);
+						if (!settled.ok) {
+							return Object.freeze({ kind: "issuer-unavailable", reason: "issue-key-rejected" });
 						}
-						return Object.freeze({ kind: "issuer-refused", code: parsed.code });
-					}
+						if (disposed || signal?.aborted === true) {
+							observePromises(settled.value);
+							return Object.freeze({ kind: "issuer-unavailable", reason: "disposed-or-aborted" });
+						}
 
-					// Valid fresh key obtained: store continuationSecret for (hub, node) renewals.
-					continuationSecret = parsed.key.continuationSecret;
-					heldKey = parsed.key;
-
-					const connection = Object.freeze({
-						markChannelTransferred(): void {
-							channelTransferred = true;
-						},
-						async connect(connectSignal?: AbortSignal): Promise<{ readonly channel?: object }> {
-							if (connectStarted) {
-								throw new Error("connection.connect(signal) may be called at most once per attempt");
+						const parsed = readIssueKeyResult(settled.value, hub, node, clock);
+						if (parsed.kind === "unavailable") {
+							return Object.freeze({ kind: "issuer-unavailable", reason: parsed.reason });
+						}
+						if (parsed.kind === "refused") {
+							if (parsed.code === "node-identity-conflict" && continuationSecret === capturedContinuation) {
+								continuationSecret = null;
 							}
-							if (disposed || connectSignal?.aborted === true) {
-								zeroOutKey();
-								throw new Error("credential attempt is already disposed or aborted");
+							// Only classify as issuer-refused if the captured proof is still the current primary proof (A3).
+							let stillCurrentProof = false;
+							try {
+								const currentProof = snapshotPrimaryProof(getProof());
+								stillCurrentProof = samePrimaryProof(capturedProof, currentProof);
+							} catch (err) {
+								observePromises(err);
+								stillCurrentProof = false;
 							}
-							connectStarted = true;
-							const keyToUse = heldKey!;
-							heldKey = null;
-							const keyForConnect = Object.freeze({
-								redemptionId: keyToUse.redemptionId,
-								pskIdentity: keyToUse.pskIdentity,
-								secret: new Uint8Array(keyToUse.secret),
-								secretHex: keyToUse.secretHex,
-								bearerToken: keyToUse.bearerToken,
-								proofMode: keyToUse.proofMode,
-								hub: keyToUse.hub,
-								node: keyToUse.node,
-								instanceBinding: keyToUse.instanceBinding,
-								validBeforeMonotonicMs: keyToUse.validBeforeMonotonicMs,
-							});
-							keyToUse.secret.fill(0);
+							if (!stillCurrentProof) {
+								return Object.freeze({ kind: "issuer-unavailable", reason: "proof-superseded" });
+							}
+							return Object.freeze({ kind: "issuer-refused", code: parsed.code });
+						}
 
-							const doConnect = async (): Promise<{ readonly channel?: object }> => {
-								const rawConnect = await connectWithKey(keyForConnect, connectSignal);
-								if (typeof rawConnect === "object" && rawConnect !== null) {
-									if (typeof rawConnect.socket === "object" && rawConnect.socket !== null) {
-										createdSocket = rawConnect.socket;
-									}
-									if (rawConnect.transferred === true) {
-										channelTransferred = true;
-									}
-									return Object.freeze(
-										rawConnect.channel !== undefined ? { channel: rawConnect.channel } : {},
-									);
+						// Valid fresh key obtained: store continuationSecret for (hub, node) renewals.
+						continuationSecret = parsed.key.continuationSecret;
+						heldKey = parsed.key;
+
+						const connection = Object.freeze({
+							markChannelTransferred(): void {
+								channelTransferred = true;
+							},
+							async connect(connectSignal?: AbortSignal): Promise<{ readonly channel?: object }> {
+								if (connectStarted) {
+									throw new Error("connection.connect(signal) may be called at most once per attempt");
 								}
-								return Object.freeze({});
-							};
+								if (disposed || connectSignal?.aborted === true) {
+									zeroOutKey();
+									throw new Error("credential attempt is already disposed or aborted");
+								}
+								connectStarted = true;
+								let resolveInFlightConnect!: () => void;
+								inFlightConnect = new Promise<void>((resolve) => {
+									resolveInFlightConnect = resolve;
+								});
+								const keyToUse = heldKey!;
+								heldKey = null;
+								const keyForConnect = Object.freeze({
+									redemptionId: keyToUse.redemptionId,
+									pskIdentity: keyToUse.pskIdentity,
+									secret: new Uint8Array(keyToUse.secret),
+									secretHex: keyToUse.secretHex,
+									bearerToken: keyToUse.bearerToken,
+									proofMode: keyToUse.proofMode,
+									hub: keyToUse.hub,
+									node: keyToUse.node,
+									instanceBinding: keyToUse.instanceBinding,
+									validBeforeMonotonicMs: keyToUse.validBeforeMonotonicMs,
+								});
+								keyToUse.secret.fill(0);
 
-							const p = doConnect();
-							inFlightConnect = p.then(
-								() => undefined,
-								(err) => {
+								try {
+									const rawConnect = await connectWithKey(keyForConnect, connectSignal);
+									if (typeof rawConnect === "object" && rawConnect !== null) {
+										if (typeof rawConnect.socket === "object" && rawConnect.socket !== null) {
+											createdSocket = rawConnect.socket;
+										}
+										if (rawConnect.transferred === true) {
+											channelTransferred = true;
+										}
+										return Object.freeze(
+											rawConnect.channel !== undefined ? { channel: rawConnect.channel } : {},
+										);
+									}
+									return Object.freeze({});
+								} catch (err) {
 									observePromises(err);
-								},
-							);
-							return p;
-						},
-					});
+									throw err;
+								} finally {
+									resolveInFlightConnect();
+								}
+							},
+						});
 
-					return Object.freeze({
-						kind: "prepared",
-						keyMeta: Object.freeze({
-							redemptionId: parsed.key.redemptionId,
-							instanceBinding: parsed.key.instanceBinding,
-							validBeforeMonotonicMs: parsed.key.validBeforeMonotonicMs,
-						}),
-						connection,
-					});
+						return Object.freeze({
+							kind: "prepared",
+							keyMeta: Object.freeze({
+								redemptionId: parsed.key.redemptionId,
+								instanceBinding: parsed.key.instanceBinding,
+								validBeforeMonotonicMs: parsed.key.validBeforeMonotonicMs,
+							}),
+							connection,
+						});
+					} finally {
+						resolveInFlightPrepare();
+					}
 				};
 
-				const p = runPrepare();
-				inFlightPrepare = p.then(
-					() => undefined,
-					(err) => {
-						observePromises(err);
-					},
-				);
-				return p;
+				return runPrepare();
 			};
 
 			const dispose = (): Promise<void> => {
@@ -579,8 +612,8 @@ export function createCredentialPresenterTarget(
 						return;
 					}
 
-					// Case 2: untransferred socket was created -> wait for that socket's exact native close receipt
-					// before releasing permit; if exact native-close evidence is absent or fails, retain custody (A3, F7).
+					// Case 2: untransferred socket was created -> capture createdSocket.closed once, require that
+					// captured value to be a native Promise, and await that exact value before releasing permit (A3, F3, F7).
 					if (createdSocket !== undefined) {
 						try {
 							const closeRet = createdSocket.close?.();
@@ -588,16 +621,20 @@ export function createCredentialPresenterTarget(
 						} catch (closeErr) {
 							observePromises(closeErr);
 						}
+						let closedReceipt: unknown;
 						let hasNativeClosedReceipt = false;
 						try {
-							hasNativeClosedReceipt = createdSocket.closed instanceof Promise;
+							closedReceipt = createdSocket.closed;
+							hasNativeClosedReceipt = closedReceipt instanceof Promise;
 						} catch (err) {
 							observePromises(err);
+							observePromises(closedReceipt);
 						}
 						if (!hasNativeClosedReceipt) {
+							observePromises(closedReceipt);
 							return;
 						}
-						const closedSettled = await settleNativePromiseOrValue(createdSocket.closed);
+						const closedSettled = await settleNativePromiseOrValue(closedReceipt);
 						if (!closedSettled.ok) {
 							return;
 						}

@@ -16,6 +16,9 @@ function createTestClock(initialMs = 1_000_000) {
 		advance: (ms) => {
 			nowMs += ms;
 		},
+		set: (ms) => {
+			nowMs = ms;
+		},
 		schedule: () => ({ cancel() {} }),
 	};
 }
@@ -387,4 +390,67 @@ test("CIss3, A2, D72, D10-E2: beginPskArrival compositionSettled sequence across
 	const reuseUseObj = makeUse();
 	assert.equal(agpIssuer.redeemBearer(reuseUseObj.use, agpKey.bearerToken, "alice.0123456789abcdef"), "refused");
 	await new Promise((r) => setImmediate(r));
+
+	// 6) Reuse where readAdmissionUse advances clock to >= validBeforeMonotonicMs does NOT call requestAdmissionTermination (Attempt 2 F6),
+	// and repeating completion for an original committed or uncertain lifecycle after terminal slot compaction remains idempotent with 0 new reports (Attempt 2 F8)
+	for (const endAt of [109, 110, 111]) {
+		const f6Clock = createTestClock(100);
+		const f6Reports = [];
+		const f6Issuer = createCredentialIssuer({
+			hub: "zorg-hub",
+			verifiers: [verifier],
+			clock: f6Clock,
+			keyLifetimeMs: 10,
+			keyRetentionMs: 100,
+			onKeyReuse: (r) => f6Reports.push(r),
+		});
+		const f6Key = await f6Issuer.issueAdmissionKey({
+			proof: { kind: "sign-in", token: "alice-token" },
+			hub: "zorg-hub",
+			node: "alice.0123456789abcdef",
+			proofMode: "bearer",
+		});
+		let advanceInRead = false;
+		let termCount = 0;
+		const f6Use1 = {
+			lifecycle: {
+				readAdmissionUse() {
+					if (advanceInRead) f6Clock.set(endAt);
+					return { state: "established", sessionId: "s-f6" };
+				},
+			},
+			control: { requestAdmissionTermination() { termCount += 1; } },
+			redemption: { recordAdmissionRedemption: () => ({ kind: "recorded" }) },
+		};
+		assert.equal(f6Issuer.redeemBearer(f6Use1, f6Key.bearerToken), "redeemed");
+		f6Clock.set(109);
+		advanceInRead = true;
+		assert.equal(f6Issuer.redeemBearer(makeUse().use, f6Key.bearerToken), "refused");
+		assert.equal(termCount, endAt < 110 ? 1 : 0);
+		assert.equal(f6Reports[0].firstSessionStopped, endAt < 110);
+	}
+
+	// Compacted original lifecycle repeat idempotence (Attempt 2 F8)
+	const f8Clock = createTestClock(100);
+	const f8Reports = [];
+	const f8Issuer = createCredentialIssuer({
+		hub: "zorg-hub",
+		verifiers: [verifier],
+		clock: f8Clock,
+		keyLifetimeMs: 10,
+		keyRetentionMs: 100,
+		onKeyReuse: (r) => f8Reports.push(r),
+	});
+	const f8Key = await f8Issuer.issueAdmissionKey({
+		proof: { kind: "sign-in", token: "alice-token" },
+		hub: "zorg-hub",
+		node: "alice.0123456789abcdef",
+		proofMode: "bearer",
+	});
+	const f8Use = makeUse({ kind: "recorded" }, "terminal", "s-f8");
+	assert.equal(f8Issuer.redeemBearer(f8Use.use, f8Key.bearerToken), "redeemed");
+	f8Clock.set(110);
+	f8Issuer.sweepLeases(); // compacts terminal slot at validBeforeMonotonicMs (110) while key is retained until 200
+	assert.equal(f8Issuer.redeemBearer(f8Use.use, f8Key.bearerToken), "redeemed", "compacted committed lifecycle stays idempotent");
+	assert.equal(f8Reports.length, 0, "no false reuse report after terminal compaction");
 });
