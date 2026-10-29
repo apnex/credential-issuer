@@ -154,6 +154,58 @@ test("CIss5, A3, D10-E2: createCredentialPresenterTarget composes with issuer.is
 	await disp3;
 	assert.equal(socketClosedResolved, true);
 	assert.equal(permit3Released, 1, "Case 2 releases permit after socket.closed resolves");
+
+	// 5) Case 2 without native close receipt (socket.closed missing) never refunds permit early (F7)
+	let permitNoReceiptReleased = 0;
+	let noReceiptCloseCalled = 0;
+	const presenterNoReceipt = createCredentialPresenterTarget({
+		hub: "zorg-hub",
+		node: "alice.0123456789abcdef",
+		clock,
+		getProof: () => currentProof,
+		issueKey: (req) => issuer.issueAdmissionKey(req),
+		connectWithKey: async () => ({
+			socket: {
+				close() {
+					noReceiptCloseCalled += 1;
+				},
+			},
+			transferred: false,
+		}),
+	});
+	presenterNoReceipt.setContinuationSecret(presenter.getContinuationSecret());
+	const attemptNoReceipt = presenterNoReceipt.createCredentialAttempt(undefined, {
+		releaseUnused() {
+			permitNoReceiptReleased += 1;
+		},
+	});
+	const prepNoReceipt = await attemptNoReceipt.prepareCredential();
+	assert.equal(prepNoReceipt.kind, "prepared");
+	await prepNoReceipt.connection.connect();
+	await attemptNoReceipt.dispose();
+	assert.equal(noReceiptCloseCalled, 1);
+	assert.equal(permitNoReceiptReleased, 0, "without exact native-close receipt, permit is never refunded early");
+
+	// 6) Deep immutable primary-proof snapshot: mutating a sign-in token object after createCredentialAttempt does not change what prepareCredential sends (F6)
+	const mutableToken = { assertion: "original" };
+	let seenTokenAssertion = null;
+	const presenterDeepSnap = createCredentialPresenterTarget({
+		hub: "zorg-hub",
+		node: "alice.0123456789abcdef",
+		clock,
+		getProof: () => ({ kind: "sign-in", token: mutableToken }),
+		issueKey(req) {
+			seenTokenAssertion = req.subjectToken.assertion;
+			return { ok: false, code: "proof-refused" };
+		},
+		connectWithKey: async () => ({}),
+	});
+	const attemptDeepSnap = presenterDeepSnap.createCredentialAttempt(undefined, { releaseUnused() {} });
+	mutableToken.assertion = "mutated";
+	const resDeepSnap = await attemptDeepSnap.prepareCredential();
+	await attemptDeepSnap.dispose();
+	assert.equal(seenTokenAssertion, "original", "captured sign-in token snapshot is deeply immutable");
+	assert.equal(resDeepSnap.kind, "issuer-unavailable", "mutated current proof supersedes the captured proof");
 });
 
 test("CIss5, A3, A4, D10-E2: classification of issuer-unavailable vs issuer-refused (with nothing dialled), plain-JSON secretHex boundary validation, and observeAdjacencyRefusal subscribe-before-read and generation >= receipt.generation rearming", async () => {
@@ -235,6 +287,23 @@ test("CIss5, A3, A4, D10-E2: classification of issuer-unavailable vs issuer-refu
 			continuationSecret: "ci_cont_1",
 			validBeforeMonotonicMs: clock.now() + 60_000,
 		},
+		// Non-string secretHex (null, 7, false) even when valid secret bytes are present (F5)
+		...([null, 7, false].map((badHex) => ({
+			ok: true,
+			redemptionId: "g1-1",
+			pskIdentity: "g1-1",
+			secret: new Uint8Array(32).fill(0xab),
+			secretHex: badHex,
+			bearerToken: "ci_key_g1-1",
+			proofMode: "native-tls13-external-psk-v1",
+			issuer: "zorg-signin",
+			principal: "alice",
+			hub: "zorg-hub",
+			node: "alice.0123456789abcdef",
+			instanceBinding: "g1-1",
+			continuationSecret: "ci_cont_1",
+			validBeforeMonotonicMs: clock.now() + 60_000,
+		}))),
 	];
 
 	for (const c of unavailableCases) {

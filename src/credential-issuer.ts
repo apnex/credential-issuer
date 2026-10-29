@@ -1,7 +1,7 @@
 /**
  * `@apnex/credential-issuer` core implementation of `CIss1`, `CIss2`, `CIss3` and `CIss4`:
  * - `CIss1`: standing-code minting, listing, revocation, and quarantine on post-rename directory-sync failure
- * - `CIss2`: `(hub, node)` exclusive leases, handle reservation lifecycle, and OAuth-shaped admission-key issuance
+ * - `CIss2`: `(hub, node)` exclusive leases (storing only `continuationSecretHash`), handle reservation lifecycle, and OAuth-shaped admission-key issuance
  * - `CIss3`: non-consuming `resolvePsk`, `completePskProof` / `redeemBearer`, live-reuse termination, `KeyReuseReport`, and `beginPskArrival` (`D72` `compositionSettled`)
  * - `CIss4`: `verifyRedeemed` dual `redemptionId` + exact `lifecycle` lookup and 4-condition `sweepLeases()` reclamation
  */
@@ -94,12 +94,31 @@ interface InternalNodeLease {
 	readonly issuer: string;
 	readonly principal: string;
 	readonly instanceBinding: string;
-	readonly continuationSecret: string;
 	readonly continuationSecretHash: string;
 	lastActivityMs: number;
 	reservedHandles: number;
 	readonly keys: Map<string, InternalKeyRecord>;
 	readonly slots: Map<object, InternalUseSlot>;
+}
+
+const EXPLICIT_REDEMPTION_REFUSAL_REASONS = new Set([
+	"authorization-expired",
+	"expired",
+	"invalid-authorization",
+	"invalid-redemption",
+	"inactive",
+	"capacity",
+	"already-recorded",
+]);
+
+/** Invokes a void callback and observes any returned or thrown native promises (`D54`, `D55`, `F4`). */
+function callVoidHook(fn: () => unknown): void {
+	try {
+		const ret = fn();
+		observePromises(ret);
+	} catch (error) {
+		observePromises(error);
+	}
 }
 
 function validateVerifiersAtConstruction(verifiers: unknown): readonly CredentialVerifier[] {
@@ -216,6 +235,123 @@ async function callBooleanRule(fn: () => unknown): Promise<{ readonly ok: true; 
 	return { ok: true, value: plain.value };
 }
 
+/**
+ * Reads `AdmissionRedemptionPort.recordAdmissionRedemption`'s return value (`F1`, `D54`, `D55`), accepting both
+ * AGP's `{ kind: "recorded", context: { redemptionId, lifecycle } }` (preserving exact `lifecycle` capability
+ * identity without JSON-serializing its methods) and `{ kind: "recorded" }`, as well as AGP's
+ * `{ kind: "refused", reason }` and shorthand `{ kind: <reason> }`.
+ */
+function readRedemptionOutcome(
+	raw: unknown,
+	expectedRedemptionId: string,
+	expectedLifecycle: AdmissionUseObservation,
+): { readonly outcome: "recorded" } | { readonly outcome: "explicit-refusal"; readonly reason: string } | { readonly outcome: "uncertain" } {
+	const captured: unknown[] = [raw];
+	const failUncertain = (): { readonly outcome: "uncertain" } => {
+		for (const item of captured) observePromises(item);
+		return { outcome: "uncertain" };
+	};
+	try {
+		if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+			return failUncertain();
+		}
+		const proto = Object.getPrototypeOf(raw);
+		if (proto !== Object.prototype && proto !== null) {
+			return failUncertain();
+		}
+		if (Object.getOwnPropertySymbols(raw).length > 0) {
+			return failUncertain();
+		}
+		const names = Object.getOwnPropertyNames(raw);
+		for (const name of names) {
+			const desc = Object.getOwnPropertyDescriptor(raw, name);
+			if (desc !== undefined && Object.hasOwn(desc, "value")) {
+				captured.push(desc.value);
+			}
+			if (desc === undefined || !desc.enumerable || !Object.hasOwn(desc, "value")) {
+				return failUncertain();
+			}
+		}
+		const kindDesc = Object.getOwnPropertyDescriptor(raw, "kind");
+		if (kindDesc === undefined || !Object.hasOwn(kindDesc, "value") || typeof kindDesc.value !== "string") {
+			return failUncertain();
+		}
+		const kind = kindDesc.value;
+
+		if (kind === "recorded") {
+			if (names.length === 1) {
+				return { outcome: "recorded" };
+			}
+			if (names.length === 2 && names.includes("context")) {
+				const ctxDesc = Object.getOwnPropertyDescriptor(raw, "context");
+				if (ctxDesc === undefined || !Object.hasOwn(ctxDesc, "value")) return failUncertain();
+				const ctx = ctxDesc.value;
+				if (typeof ctx !== "object" || ctx === null || Array.isArray(ctx)) return failUncertain();
+				const ctxProto = Object.getPrototypeOf(ctx);
+				if (ctxProto !== Object.prototype && ctxProto !== null) return failUncertain();
+				if (Object.getOwnPropertySymbols(ctx).length > 0) return failUncertain();
+				const ctxNames = Object.getOwnPropertyNames(ctx);
+				if (ctxNames.length !== 2) return failUncertain();
+				for (const ck of ctxNames) {
+					const d = Object.getOwnPropertyDescriptor(ctx, ck);
+					if (d !== undefined && Object.hasOwn(d, "value")) captured.push(d.value);
+					if (d === undefined || !d.enumerable || !Object.hasOwn(d, "value")) return failUncertain();
+				}
+				const idDesc = Object.getOwnPropertyDescriptor(ctx, "redemptionId");
+				const lcDesc = Object.getOwnPropertyDescriptor(ctx, "lifecycle");
+				if (
+					idDesc === undefined ||
+					lcDesc === undefined ||
+					idDesc.value !== expectedRedemptionId ||
+					lcDesc.value !== expectedLifecycle
+				) {
+					return failUncertain();
+				}
+				return { outcome: "recorded" };
+			}
+			return failUncertain();
+		}
+
+		if (kind === "refused" && names.length === 2 && names.includes("reason")) {
+			const reasonDesc = Object.getOwnPropertyDescriptor(raw, "reason");
+			if (
+				reasonDesc !== undefined &&
+				Object.hasOwn(reasonDesc, "value") &&
+				typeof reasonDesc.value === "string" &&
+				EXPLICIT_REDEMPTION_REFUSAL_REASONS.has(reasonDesc.value)
+			) {
+				return { outcome: "explicit-refusal", reason: reasonDesc.value };
+			}
+			return failUncertain();
+		}
+
+		if (names.length === 1 && EXPLICIT_REDEMPTION_REFUSAL_REASONS.has(kind)) {
+			return { outcome: "explicit-refusal", reason: kind };
+		}
+
+		return failUncertain();
+	} catch (error) {
+		captured.push(error);
+		return failUncertain();
+	}
+}
+
+/** Validates an AGP `AdmissionSessionIdentity` plain object and extracts `localSessionId` (`F1`). */
+function extractSessionIdFromIdentity(sessionObj: unknown): string | null | "invalid" {
+	if (sessionObj === undefined) return null;
+	if (typeof sessionObj !== "object" || sessionObj === null || Array.isArray(sessionObj)) return "invalid";
+	const rec = sessionObj as Record<string, unknown>;
+	for (const k of Object.keys(rec)) {
+		if (k !== "remoteNodeId" && k !== "localSessionId" && k !== "authorizationAssociation") {
+			return "invalid";
+		}
+	}
+	if (!isValidBoundedIdentifier(rec.remoteNodeId) || !isValidBoundedIdentifier(rec.localSessionId)) {
+		return "invalid";
+	}
+	return rec.localSessionId;
+}
+
 /** Creates one `CredentialIssuer` instance for one hub audience (`CIss1` to `CIss4`). */
 export function createCredentialIssuer(options: CredentialIssuerOptions): CredentialIssuer {
 	if (typeof options !== "object" || options === null) {
@@ -287,8 +423,14 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 		throw new TypeError("options.maxPskIdentityBytes must be <= 127");
 	}
 
-	// Load and validate initial standing codes synchronously.
-	const rawInitialCodes = standingCodeStore.load();
+	// Load and validate initial standing codes synchronously through readPlainJson (F2).
+	let rawInitialCodes: unknown;
+	try {
+		rawInitialCodes = standingCodeStore.load();
+	} catch (error) {
+		observePromises(error);
+		throw error;
+	}
 	const loadedCodes = readStandingCodeRecordList(rawInitialCodes);
 	if (loadedCodes === null) {
 		const err = new Error("standingCodeStore.load() returned invalid StandingCodeRecord data") as Error & { code: string };
@@ -327,15 +469,19 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			return false;
 		}
 		if (typeof val === "object" && val !== null) {
-			const desc = Object.getOwnPropertyDescriptor(val, "redemptionId");
-			const pskDesc = Object.getOwnPropertyDescriptor(val, "pskIdentity");
-			const bearerDesc = Object.getOwnPropertyDescriptor(val, "bearerToken");
-			if (
-				(desc !== undefined && "value" in desc && typeof desc.value === "string" && retainedKeys.has(desc.value)) ||
-				(pskDesc !== undefined && "value" in pskDesc && typeof pskDesc.value === "string" && retainedKeys.has(pskDesc.value)) ||
-				(bearerDesc !== undefined && "value" in bearerDesc && typeof bearerDesc.value === "string" && (bearerDesc.value.startsWith("ci_key_") || bearerTokensToKeyId.has(bearerDesc.value)))
-			) {
-				return true;
+			try {
+				const desc = Object.getOwnPropertyDescriptor(val, "redemptionId");
+				const pskDesc = Object.getOwnPropertyDescriptor(val, "pskIdentity");
+				const bearerDesc = Object.getOwnPropertyDescriptor(val, "bearerToken");
+				if (
+					(desc !== undefined && Object.hasOwn(desc, "value") && typeof desc.value === "string" && retainedKeys.has(desc.value)) ||
+					(pskDesc !== undefined && Object.hasOwn(pskDesc, "value") && typeof pskDesc.value === "string" && retainedKeys.has(pskDesc.value)) ||
+					(bearerDesc !== undefined && Object.hasOwn(bearerDesc, "value") && typeof bearerDesc.value === "string" && (bearerDesc.value.startsWith("ci_key_") || bearerTokensToKeyId.has(bearerDesc.value)))
+				) {
+					return true;
+				}
+			} catch (err) {
+				observePromises(err);
 			}
 		}
 		return false;
@@ -368,6 +514,11 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 		}
 	};
 
+	/**
+	 * Reads `lifecycle.readAdmissionUse()` as plain data (`F1`, `D54`, `D55`), supporting both AGP's
+	 * `AdmissionUseSnapshot` (`session.localSessionId`, `admittedSession.localSessionId`, `reachedEstablished`)
+	 * and shorthand `{ state, sessionId }`.
+	 */
 	const readUseObservation = (
 		lifecycle: AdmissionUseObservation,
 	): { readonly state: "pending" | "admitted" | "established" | "terminal"; readonly sessionId: string | null } | "unknown" => {
@@ -387,14 +538,42 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 		if (state !== "pending" && state !== "admitted" && state !== "established" && state !== "terminal") {
 			return "unknown";
 		}
+		for (const k of Object.keys(obj)) {
+			if (
+				k !== "state" &&
+				k !== "session" &&
+				k !== "admittedSession" &&
+				k !== "reachedEstablished" &&
+				k !== "sessionId"
+			) {
+				return "unknown";
+			}
+		}
+
 		let sessionId: string | null = null;
 		if ("sessionId" in obj && obj.sessionId !== undefined && obj.sessionId !== null) {
 			if (!isValidBoundedIdentifier(obj.sessionId)) return "unknown";
 			sessionId = obj.sessionId;
 		}
-		for (const k of Object.keys(obj)) {
-			if (k !== "state" && k !== "sessionId") return "unknown";
+		if ("session" in obj && obj.session !== undefined && obj.session !== null) {
+			if (state !== "admitted" && state !== "established") return "unknown";
+			const extracted = extractSessionIdFromIdentity(obj.session);
+			if (extracted === "invalid") return "unknown";
+			if (extracted !== null) sessionId = extracted;
 		}
+		if ("admittedSession" in obj && obj.admittedSession !== undefined && obj.admittedSession !== null) {
+			if (state !== "terminal") return "unknown";
+			const extracted = extractSessionIdFromIdentity(obj.admittedSession);
+			if (extracted === "invalid") return "unknown";
+			if (extracted !== null) sessionId = extracted;
+		}
+		if ("reachedEstablished" in obj && obj.reachedEstablished !== undefined) {
+			if (state !== "terminal" || typeof obj.reachedEstablished !== "boolean") return "unknown";
+			if (obj.reachedEstablished === true && "admittedSession" in obj && obj.admittedSession === undefined) {
+				return "unknown";
+			}
+		}
+
 		return { state, sessionId };
 	};
 
@@ -453,7 +632,6 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			}
 
 			// 3. Check the 4 D62 reclamation conditions together in the same synchronous turn:
-			// (1) No unspent key under lease.instanceBinding has nowMs < key.validBeforeMonotonicMs
 			let hasLiveUnspentKey = false;
 			for (const [, keyRec] of lease.keys) {
 				if (keyRec.state === "unspent" && nowMs < keyRec.validBeforeMonotonicMs) {
@@ -461,7 +639,6 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 					break;
 				}
 			}
-			// (2) & (3) Every registered slot on the lease has been observed terminal (and no prepared/uncertain/pending/admitted/established slot remains non-terminal)
 			let hasNonTerminalSlot = false;
 			for (const [, slot] of lease.slots) {
 				if (slot.terminalObservedAtMs === null) {
@@ -469,11 +646,9 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 					break;
 				}
 			}
-			// (4) Reconnect grace TTL has elapsed since lease.lastActivityMs
 			const graceElapsed = nowMs - lease.lastActivityMs >= reconnectGraceMs;
 
 			if (!hasLiveUnspentKey && !hasNonTerminalSlot && graceElapsed) {
-				// Compact any remaining terminal slots on the reclaimed lease and release their reservations
 				for (const [lc, slot] of lease.slots) {
 					slot.compacted = true;
 					slotsByLifecycle.delete(lc);
@@ -513,8 +688,18 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			return "ok";
 		} catch (error) {
 			observePromises(error);
-			if ((error as { afterRename?: boolean })?.afterRename === true) {
-				storeQuarantined = true;
+			if (typeof error === "object" && error !== null) {
+				try {
+					const desc = Object.getOwnPropertyDescriptor(error, "afterRename");
+					if (desc !== undefined && Object.hasOwn(desc, "value")) {
+						observePromises(desc.value);
+						if (desc.enumerable === true && desc.value === true) {
+							storeQuarantined = true;
+						}
+					}
+				} catch (descErr) {
+					observePromises(descErr);
+				}
 			}
 			return "unwritable";
 		}
@@ -536,6 +721,9 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			return Object.freeze({ ok: false, code: "proof-refused" });
 		}
 		if (await checkSignInRevoked(verified.principal, verified.issuer, verified.session)) {
+			return Object.freeze({ ok: false, code: "proof-refused" });
+		}
+		if (verified.expiresAt !== null && !(clock.now() < verified.expiresAt)) {
 			return Object.freeze({ ok: false, code: "proof-refused" });
 		}
 		if (!isValidIdentity(identity)) {
@@ -560,7 +748,7 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			return Object.freeze({ ok: false, code: "forbidden-identity" });
 		}
 
-		// Serialized commit turn: re-verify sign-in expiry, revocation, quarantine, and wall-clock expiry.
+		// Serialized commit turn: re-verify sign-in expiry, revocation, post-await expiry, quarantine, and wall-clock expiry (F3).
 		if (storeQuarantined) {
 			return Object.freeze({ ok: false, code: "code-store-unwritable" });
 		}
@@ -568,6 +756,9 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			return Object.freeze({ ok: false, code: "proof-refused" });
 		}
 		if (await checkSignInRevoked(verified.principal, verified.issuer, verified.session)) {
+			return Object.freeze({ ok: false, code: "proof-refused" });
+		}
+		if (verified.expiresAt !== null && !(clock.now() < verified.expiresAt)) {
 			return Object.freeze({ ok: false, code: "proof-refused" });
 		}
 		if (storeQuarantined) {
@@ -629,6 +820,9 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 		if (await checkSignInRevoked(verified.principal, verified.issuer, verified.session)) {
 			return Object.freeze({ ok: false, code: "proof-refused" });
 		}
+		if (verified.expiresAt !== null && !(clock.now() < verified.expiresAt)) {
+			return Object.freeze({ ok: false, code: "proof-refused" });
+		}
 		if (storeQuarantined) {
 			return Object.freeze({ ok: false, code: "code-store-unwritable" });
 		}
@@ -667,6 +861,9 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			return Object.freeze({ ok: false, code: "proof-refused" });
 		}
 		if (await checkSignInRevoked(verified.principal, verified.issuer, verified.session)) {
+			return Object.freeze({ ok: false, code: "proof-refused" });
+		}
+		if (verified.expiresAt !== null && !(clock.now() < verified.expiresAt)) {
 			return Object.freeze({ ok: false, code: "proof-refused" });
 		}
 		if (storeQuarantined) {
@@ -761,6 +958,9 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			if (await checkSignInRevoked(verified.principal, verified.issuer, verified.session)) {
 				return Object.freeze({ ok: false, code: "proof-refused" });
 			}
+			if (verified.expiresAt !== null && !(clock.now() < verified.expiresAt)) {
+				return Object.freeze({ ok: false, code: "proof-refused" });
+			}
 			principal = verified.principal;
 			issuer = verified.issuer;
 			verifiedSession = verified.session;
@@ -848,6 +1048,7 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 		const lKey = leaseKey(hub, request.node);
 		let lease = activeLeases.get(lKey);
 		const nowAtIssue = clock.now();
+		let returnedContinuationSecret: string;
 
 		if (lease !== undefined) {
 			if (
@@ -862,13 +1063,14 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 				return Object.freeze({ ok: false, code: "lease-capacity" });
 			}
 			lease.lastActivityMs = Math.max(lease.lastActivityMs, nowAtIssue);
+			returnedContinuationSecret = request.continuationSecret;
 		} else {
 			if (activeLeases.size >= maxActiveLeases || totalReservedHandles >= maxTotalHandles) {
 				return Object.freeze({ ok: false, code: "lease-capacity" });
 			}
 			const contBytes = drawRandomBytes(32);
-			const continuationSecret = `ci_cont_${bytesToHex(contBytes)}`;
-			const continuationSecretHash = sha256Hex(continuationSecret);
+			const freshContinuationSecret = `ci_cont_${bytesToHex(contBytes)}`;
+			const continuationSecretHash = sha256Hex(freshContinuationSecret);
 			const instanceBinding = `${generation}-${++nextAllocationId}`;
 			lease = {
 				hub,
@@ -876,7 +1078,6 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 				issuer,
 				principal,
 				instanceBinding,
-				continuationSecret,
 				continuationSecretHash,
 				lastActivityMs: nowAtIssue,
 				reservedHandles: 0,
@@ -884,6 +1085,7 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 				slots: new Map(),
 			};
 			activeLeases.set(lKey, lease);
+			returnedContinuationSecret = freshContinuationSecret;
 		}
 
 		const secretBytes = drawRandomBytes(32);
@@ -945,7 +1147,7 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			hub,
 			node: request.node,
 			instanceBinding: lease.instanceBinding,
-			continuationSecret: lease.continuationSecret,
+			continuationSecret: returnedContinuationSecret,
 			issuedAtMonotonicMs: nowAtIssue,
 			validBeforeMonotonicMs,
 			claims,
@@ -1034,7 +1236,7 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			return "refused";
 		}
 
-		// 2. Second presentation / key reuse check (CIss3 step 2, o:F2, o:F3, o:F6).
+		// 2. Second presentation / key reuse check (CIss3 step 2, o:F2, o:F3, o:F6, F1, F4).
 		if (keyRec.state === "spent" || keyRec.state === "uncertain") {
 			keyRec.refusedReuseLifecycles.add(use.lifecycle);
 			const secondUseId = `${generation}-use-${++nextUseId}`;
@@ -1054,13 +1256,9 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			}
 			let firstSessionStopped = false;
 			if (live && keyRec.firstUse !== null) {
-				try {
-					keyRec.firstUse.control.requestAdmissionTermination();
-					firstSessionStopped = true;
-				} catch (error) {
-					observePromises(error);
-					firstSessionStopped = true;
-				}
+				const firstControl = keyRec.firstUse.control;
+				callVoidHook(() => firstControl.requestAdmissionTermination());
+				firstSessionStopped = true;
 			}
 			if (onKeyReuse !== undefined) {
 				const report: KeyReuseReport = Object.freeze({
@@ -1078,11 +1276,7 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 					secondRedemptionId: keyRec.redemptionId,
 					firstSessionStopped,
 				});
-				try {
-					onKeyReuse(report);
-				} catch (error) {
-					observePromises(error);
-				}
+				callVoidHook(() => onKeyReuse(report));
 			}
 			return "refused";
 		}
@@ -1141,52 +1335,27 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			keyRec.state = "uncertain";
 			keyRec.firstUse = slot;
 			keyRec.firstUseSummary = Object.freeze({ useId, sessionId: null });
-			try {
-				use.control.requestAdmissionTermination();
-			} catch (termError) {
-				observePromises(termError);
-			}
+			callVoidHook(() => use.control.requestAdmissionTermination());
 			return "refused";
 		}
 
-		const plain = readPlainJson(rawResult);
-		if (!plain.ok || plain.value === null || typeof plain.value !== "object" || Array.isArray(plain.value)) {
-			slot.state = "uncertain";
-			keyRec.state = "uncertain";
-			keyRec.firstUse = slot;
-			keyRec.firstUseSummary = Object.freeze({ useId, sessionId: null });
-			try {
-				use.control.requestAdmissionTermination();
-			} catch (termError) {
-				observePromises(termError);
-			}
-			return "refused";
-		}
-
-		const obj = plain.value as Record<string, unknown>;
-		const kind = obj.kind;
-		if (Object.keys(obj).length === 1 && kind === "recorded") {
+		const parsedOutcome = readRedemptionOutcome(rawResult, keyRec.redemptionId, use.lifecycle);
+		if (parsedOutcome.outcome === "recorded") {
 			slot.state = "committed";
 			keyRec.state = "spent";
 			keyRec.firstUse = slot;
-			keyRec.firstUseSummary = Object.freeze({ useId, sessionId: null });
+			const initialObs = readUseObservation(use.lifecycle);
+			const initialSessionId = initialObs !== "unknown" ? initialObs.sessionId : null;
+			slot.sessionId = initialSessionId;
+			keyRec.firstUseSummary = Object.freeze({ useId, sessionId: initialSessionId });
 			lease.lastActivityMs = Math.max(lease.lastActivityMs, clock.now());
 			return "redeemed";
 		}
 
-		if (
-			Object.keys(obj).length === 1 &&
-			(kind === "authorization-expired" ||
-				kind === "expired" ||
-				kind === "invalid-authorization" ||
-				kind === "invalid-redemption" ||
-				kind === "inactive" ||
-				kind === "capacity" ||
-				kind === "already-recorded")
-		) {
+		if (parsedOutcome.outcome === "explicit-refusal") {
 			lease.slots.delete(use.lifecycle);
 			slotsByLifecycle.delete(use.lifecycle);
-			if (kind === "expired" || kind === "authorization-expired") {
+			if (parsedOutcome.reason === "expired" || parsedOutcome.reason === "authorization-expired") {
 				if (clock.now() >= keyRec.validBeforeMonotonicMs) {
 					releaseKeyReservation(lease, keyRec);
 				}
@@ -1198,11 +1367,7 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 		keyRec.state = "uncertain";
 		keyRec.firstUse = slot;
 		keyRec.firstUseSummary = Object.freeze({ useId, sessionId: null });
-		try {
-			use.control.requestAdmissionTermination();
-		} catch (termError) {
-			observePromises(termError);
-		}
+		callVoidHook(() => use.control.requestAdmissionTermination());
 		return "refused";
 	};
 
@@ -1272,10 +1437,8 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 				throw new TypeError("beginPskArrival requires a non-null arrival object");
 			}
 		} catch (setupError) {
-			try {
-				use.finishAdmissionAcquisition?.();
-			} catch (finishError) {
-				observePromises(finishError);
+			if (typeof use.finishAdmissionAcquisition === "function") {
+				callVoidHook(() => use.finishAdmissionAcquisition!());
 			}
 			throw setupError;
 		}
@@ -1292,30 +1455,23 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 		});
 
 		const disposeHostChannel = (channel: { close?(): void; dispose?(): void }): void => {
-			try {
-				if (typeof channel.close === "function") channel.close();
-				else if (typeof channel.dispose === "function") channel.dispose();
-			} catch (err) {
-				observePromises(err);
+			if (typeof channel.close === "function") {
+				callVoidHook(() => channel.close!());
+			} else if (typeof channel.dispose === "function") {
+				callVoidHook(() => channel.dispose!());
 			}
 		};
 
 		const revokeUse = (): void => {
-			try {
-				use.control.requestAdmissionTermination();
-			} catch (err) {
-				observePromises(err);
-			}
+			callVoidHook(() => use.control.requestAdmissionTermination());
 		};
 
 		const maybeFinishComposition = (): void => {
 			if (finished) return;
 			if (!carrierSettled || !hostStepSettled) return;
 			finished = true;
-			try {
-				use.finishAdmissionAcquisition?.();
-			} catch (err) {
-				observePromises(err);
+			if (typeof use.finishAdmissionAcquisition === "function") {
+				callVoidHook(() => use.finishAdmissionAcquisition!());
 			}
 			resolveSettled();
 		};
@@ -1358,36 +1514,33 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 					return;
 				}
 				channelAccepted = true;
-				// Record host custody and return normally first; run seal + acceptAdmission in a bounded continuation.
+				// Record host custody and return normally first; run seal + acceptAdmission in a bounded continuation (D72, F8).
 				queueMicrotask(() => {
 					try {
-						if (proofOutcome !== "redeemed") {
+						if (proofOutcome !== "redeemed" || typeof use.sealAdmissionHandoff !== "function") {
 							revokeUse();
 							disposeHostChannel(channel);
 							return;
 						}
-						if (typeof use.sealAdmissionHandoff === "function") {
-							const sealed = use.sealAdmissionHandoff(channel);
-							if (sealed.kind !== "sealed") {
-								revokeUse();
-								disposeHostChannel(channel);
-								return;
-							}
-							try {
-								callbacks.acceptAdmission(sealed.handoff);
-							} catch (acceptErr) {
-								observePromises(acceptErr);
-								revokeUse();
-								disposeHostChannel(channel);
-							}
-						} else {
-							try {
-								callbacks.acceptAdmission(channel);
-							} catch (acceptErr) {
-								observePromises(acceptErr);
-								revokeUse();
-								disposeHostChannel(channel);
-							}
+						const sealed = use.sealAdmissionHandoff(channel);
+						if (
+							typeof sealed !== "object" ||
+							sealed === null ||
+							sealed.kind !== "sealed" ||
+							typeof (sealed as { readonly handoff?: unknown }).handoff !== "object" ||
+							(sealed as { readonly handoff?: unknown }).handoff === null
+						) {
+							revokeUse();
+							disposeHostChannel(channel);
+							return;
+						}
+						try {
+							const acceptRet = callbacks.acceptAdmission(sealed.handoff);
+							observePromises(acceptRet);
+						} catch (acceptErr) {
+							observePromises(acceptErr);
+							revokeUse();
+							disposeHostChannel(channel);
 						}
 					} catch (sealErr) {
 						observePromises(sealErr);
@@ -1403,7 +1556,6 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 				if (carrierSettled) return;
 				carrierSettled = true;
 				if (!channelAccepted) {
-					// Genuinely no-channel attempt: revoke any prepared/redeemed use and complete composition.
 					if (proofOutcome !== "none") {
 						revokeUse();
 					}

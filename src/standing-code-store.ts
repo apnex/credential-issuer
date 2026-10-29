@@ -60,13 +60,18 @@ export function readStandingCodeRecord(raw: unknown): StandingCodeRecord | null 
 	});
 }
 
-/** Validates an array of `StandingCodeRecord`s (checking uniqueness of `codeId` and `codeHash`), or returns `null`. */
+/**
+ * Validates an array of `StandingCodeRecord`s as plain data through `readPlainJson` (`D54`, `D55`), rejecting
+ * array subclasses, index getters, custom iterators, symbols or extra properties and observing any reachable
+ * native promises on refusal.
+ */
 export function readStandingCodeRecordList(raw: unknown): readonly StandingCodeRecord[] | null {
-	if (!Array.isArray(raw)) return null;
+	const plain = readPlainJson(raw);
+	if (!plain.ok || !Array.isArray(plain.value)) return null;
 	const seenIds = new Set<string>();
 	const seenHashes = new Set<string>();
 	const out: StandingCodeRecord[] = [];
-	for (const item of raw) {
+	for (const item of plain.value) {
 		const rec = readStandingCodeRecord(item);
 		if (rec === null) return null;
 		if (seenIds.has(rec.codeId) || seenHashes.has(rec.codeHash)) return null;
@@ -81,7 +86,7 @@ export function readStandingCodeRecordList(raw: unknown): readonly StandingCodeR
 export function createMemoryStandingCodeStore(initialRecords: readonly StandingCodeRecord[] = []): StandingCodeStore {
 	const initial = readStandingCodeRecordList(initialRecords);
 	if (initial === null) {
-		throw new TypeError("initialRecords must be an array of valid StandingCodeRecord objects with unique codeId and codeHash");
+		throw new TypeError("initialRecords must be a plain array of valid StandingCodeRecord objects with unique codeId and codeHash");
 	}
 	let current: readonly StandingCodeRecord[] = initial;
 	return Object.freeze({
@@ -91,7 +96,7 @@ export function createMemoryStandingCodeStore(initialRecords: readonly StandingC
 		save(records: readonly StandingCodeRecord[]): void {
 			const validated = readStandingCodeRecordList(records);
 			if (validated === null) {
-				throw new TypeError("records must be an array of valid StandingCodeRecord objects with unique codeId and codeHash");
+				throw new TypeError("records must be a plain array of valid StandingCodeRecord objects with unique codeId and codeHash");
 			}
 			current = validated;
 		},

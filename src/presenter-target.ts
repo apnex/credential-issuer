@@ -2,7 +2,7 @@
  * Client credential presentation (`createCredentialPresenterTarget`, `A3`) and refusal observation
  * (`observeAdjacencyRefusal`, `A4`) for `CIss5` (`fresh-key-per-dial`).
  */
-import { observePromises, readPlainJson } from "@apnex/shape-check";
+import { observePromises, readPlainJson, toCanonicalJson, type JsonInput } from "@apnex/shape-check";
 import { defaultClock, type ClockPort } from "./clock-adapter.js";
 import type {
 	AdjacencyRefusalObserver,
@@ -66,7 +66,7 @@ async function settleNativePromiseOrValue(raw: unknown): Promise<{ readonly ok: 
 	});
 }
 
-/** Reads and validates a `ClientPrimaryProof` snapshot via own enumerable data descriptors (`CIss5`). */
+/** Reads and deeply snapshots a `ClientPrimaryProof` via own enumerable data descriptors and `readPlainJson` (`CIss5`, `F6`). */
 function snapshotPrimaryProof(raw: unknown): ClientPrimaryProof {
 	if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
 		throw new TypeError("getProof() must return a plain object { kind: \"sign-in\", token } or { kind: \"standing-code\", code }");
@@ -94,7 +94,11 @@ function snapshotPrimaryProof(raw: unknown): ClientPrimaryProof {
 		if (tokenDesc.value === undefined || tokenDesc.value === null) {
 			throw new TypeError("sign-in proof token must not be null or undefined");
 		}
-		return Object.freeze({ kind: "sign-in", token: tokenDesc.value });
+		const tokenPlain = readPlainJson(tokenDesc.value);
+		if (!tokenPlain.ok || tokenPlain.value === null) {
+			throw new TypeError("sign-in proof token must be a non-null plain JSON value");
+		}
+		return Object.freeze({ kind: "sign-in", token: tokenPlain.value });
 	}
 	if (kindDesc.value === "standing-code") {
 		const codeDesc = Object.getOwnPropertyDescriptor(raw, "code");
@@ -114,13 +118,17 @@ function snapshotPrimaryProof(raw: unknown): ClientPrimaryProof {
 
 function samePrimaryProof(a: ClientPrimaryProof, b: ClientPrimaryProof): boolean {
 	if (a.kind !== b.kind) return false;
-	if (a.kind === "sign-in" && b.kind === "sign-in") return a.token === b.token;
-	if (a.kind === "standing-code" && b.kind === "standing-code") return a.code === b.code;
+	if (a.kind === "sign-in" && b.kind === "sign-in") {
+		return toCanonicalJson(a.token as JsonInput) === toCanonicalJson(b.token as JsonInput);
+	}
+	if (a.kind === "standing-code" && b.kind === "standing-code") {
+		return a.code === b.code;
+	}
 	return false;
 }
 
 /**
- * Reads the result of `issueKey` across the plain-JSON / in-process `Uint8Array(32)` boundary (`o:F1`, `D54`, `D55`).
+ * Reads the result of `issueKey` across the plain-JSON / in-process `Uint8Array(32)` boundary (`o:F1`, `F5`, `D54`, `D55`).
  */
 function readIssueKeyResult(
 	raw: unknown,
@@ -249,7 +257,10 @@ function readIssueKeyResult(
 
 		let finalSecret: Uint8Array;
 		let finalSecretHex: string;
-		if (typeof secretHex === "string") {
+		if ("secretHex" in obj) {
+			if (typeof secretHex !== "string") {
+				return failUnavailable("malformed-psk-secret");
+			}
 			const decoded = hexToBytes(secretHex, 32);
 			if (decoded === null) {
 				return failUnavailable("malformed-psk-secret");
@@ -394,7 +405,12 @@ export function createCredentialPresenterTarget(
 			const releasePermitOnce = (): void => {
 				if (permitReleased) return;
 				permitReleased = true;
-				permit.releaseUnused();
+				try {
+					const ret = permit.releaseUnused();
+					observePromises(ret);
+				} catch (err) {
+					observePromises(err);
+				}
 			};
 
 			const prepareCredential = (signal?: AbortSignal): Promise<PrepareCredentialResult> => {
@@ -563,15 +579,27 @@ export function createCredentialPresenterTarget(
 						return;
 					}
 
-					// Case 2: untransferred socket was created -> wait for that socket's exact native close before releasing permit.
+					// Case 2: untransferred socket was created -> wait for that socket's exact native close receipt
+					// before releasing permit; if exact native-close evidence is absent or fails, retain custody (A3, F7).
 					if (createdSocket !== undefined) {
 						try {
-							createdSocket.close?.();
+							const closeRet = createdSocket.close?.();
+							observePromises(closeRet);
 						} catch (closeErr) {
 							observePromises(closeErr);
 						}
-						if (createdSocket.closed !== undefined) {
-							await settleNativePromiseOrValue(createdSocket.closed);
+						let hasNativeClosedReceipt = false;
+						try {
+							hasNativeClosedReceipt = createdSocket.closed instanceof Promise;
+						} catch (err) {
+							observePromises(err);
+						}
+						if (!hasNativeClosedReceipt) {
+							return;
+						}
+						const closedSettled = await settleNativePromiseOrValue(createdSocket.closed);
+						if (!closedSettled.ok) {
+							return;
 						}
 						releasePermitOnce();
 						return;
@@ -687,13 +715,14 @@ export function observeAdjacencyRefusal(options: AdjacencyRefusalObserverOptions
 		if (isRefused && generation > lastNotifiedRefusedGeneration && onAdmissionRefused !== undefined) {
 			lastNotifiedRefusedGeneration = generation;
 			try {
-				onAdmissionRefused(
+				const ret = onAdmissionRefused(
 					Object.freeze({
 						adjacencyId,
 						generation,
 						...(code !== undefined ? { code } : {}),
 					}),
 				);
+				observePromises(ret);
 			} catch (err) {
 				observePromises(err);
 			}

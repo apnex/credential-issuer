@@ -45,9 +45,9 @@ function makeUse(recordOutcome = { kind: "recorded" }, state = "established", se
 				},
 			},
 			redemption: {
-				recordAdmissionRedemption() {
+				recordAdmissionRedemption(...args) {
 					recordCalls += 1;
-					if (typeof recordOutcome === "function") return recordOutcome();
+					if (typeof recordOutcome === "function") return recordOutcome(...args);
 					return recordOutcome;
 				},
 			},
@@ -312,4 +312,79 @@ test("CIss3, A2, D72, D10-E2: beginPskArrival compositionSettled sequence across
 			assert.equal(channelClosed, 0);
 		}
 	}
+
+	// 4) Missing sealAdmissionHandoff on use never offers a raw unsealed channel to acceptAdmission (F8)
+	const keyMissingSeal = await issuer.issueAdmissionKey({
+		proof: { kind: "sign-in", token: "alice-token" },
+		hub: "zorg-hub",
+		node: "alice.0123456789abcdef",
+		continuationSecret: keyNoChan.continuationSecret,
+	});
+	let unsealedOffers = 0;
+	let unsealedChannelClosed = 0;
+	let unsealedTerminated = 0;
+	const missingSealPool = {
+		reserveAdmissionUse() {
+			return {
+				kind: "reserved",
+				use: {
+					lifecycle: { readAdmissionUse: () => ({ state: "admitted" }) },
+					control: { requestAdmissionTermination() { unsealedTerminated += 1; } },
+					redemption: { recordAdmissionRedemption: () => ({ kind: "recorded" }) },
+					finishAdmissionAcquisition() {},
+				},
+			};
+		},
+	};
+	const attemptMissingSeal = issuer.beginPskArrival(
+		missingSealPool,
+		{ acceptAdmission() { unsealedOffers += 1; } },
+		{},
+	);
+	const lookMissingSeal = attemptMissingSeal.resolvePsk(keyMissingSeal.pskIdentity);
+	assert.equal(
+		attemptMissingSeal.completePskProof({ arrival: attemptMissingSeal.arrival, lookupRef: lookMissingSeal.lookupRef }),
+		"redeemed",
+	);
+	attemptMissingSeal.acceptPskChannel({ close() { unsealedChannelClosed += 1; } });
+	attemptMissingSeal.carrierAcquisitionSettled();
+	await attemptMissingSeal.settled;
+	assert.equal(unsealedOffers, 0, "never offers raw unsealed channel when sealAdmissionHandoff is missing");
+	assert.equal(unsealedTerminated, 1);
+	assert.equal(unsealedChannelClosed, 1);
+
+	// 5) AGP AdmissionRedemptionResult with context ({ kind: "recorded", context: { redemptionId, lifecycle } }) and
+	// { kind: "refused", reason }, plus redeemBearer path and D55 rejected-Promise observation on onKeyReuse / requestAdmissionTermination (F1, F4, F10)
+	const agpIssuer = createCredentialIssuer({
+		hub: "zorg-hub",
+		verifiers: [verifier],
+		clock,
+		onKeyReuse: () => Promise.reject(new Error("D55 onKeyReuse rejection")),
+	});
+	const agpKey = await agpIssuer.issueAdmissionKey({
+		proof: { kind: "sign-in", token: "alice-token" },
+		hub: "zorg-hub",
+		node: "alice.0123456789abcdef",
+		proofMode: "bearer",
+	});
+	assert.equal(agpKey.ok, true);
+
+	// Explicit AGP { kind: "refused", reason: "inactive" } preserves the unspent key
+	const refusedUse = makeUse(() => ({ kind: "refused", reason: "inactive" }));
+	assert.equal(agpIssuer.redeemBearer(refusedUse.use, agpKey.bearerToken, "alice.0123456789abcdef"), "refused");
+	assert.equal(refusedUse.terminated, 0);
+
+	// AGP { kind: "recorded", context: { redemptionId, lifecycle } } redeems the bearer key
+	let recordedUseObj;
+	recordedUseObj = makeUse((id) => ({
+		kind: "recorded",
+		context: { redemptionId: id, lifecycle: recordedUseObj.use.lifecycle },
+	}));
+	recordedUseObj.use.control.requestAdmissionTermination = () => Promise.reject(new Error("D55 termination rejection"));
+	assert.equal(agpIssuer.redeemBearer(recordedUseObj.use, agpKey.bearerToken, "alice.0123456789abcdef"), "redeemed");
+
+	// Second bearer presentation triggers live termination and onKeyReuse (both returning rejected Promises, consumed via D55)
+	const reuseUseObj = makeUse();
+	assert.equal(agpIssuer.redeemBearer(reuseUseObj.use, agpKey.bearerToken, "alice.0123456789abcdef"), "refused");
+	await new Promise((r) => setImmediate(r));
 });

@@ -357,13 +357,97 @@ test("CIss1, D10-E2: createFileStandingCodeStore persistence across restart, sym
 	const recoveredList = await recoveredIssuer.listStandingCodes({ proof: "signin-alice" });
 	assert.equal(recoveredList.ok, true);
 	assert.notEqual(recoveredList.codes[0].revokedAtMs, null);
-	assert.deepEqual(
-		await recoveredIssuer.issueAdmissionKey({
-			grantType: "client_credentials",
-			clientSecret: toRevoke.code,
+	// 7) D54/D55 on StandingCodeStore.load() container (index-getter, iterator, extra-property, symbol, subclass, and rejected Promise on array)
+	// and save() thrown error with getter afterRename (F2), plus sign-in expiry during async isSignInRevoked in mint, list and revoke (F3)
+	const validRec = {
+		codeId: "sc_0123456789abcdef",
+		codeHash: "a".repeat(64),
+		identity: "alice",
+		minterPrincipal: "alice",
+		minterIssuer: "zorg-signin",
+		createdAtMs: 0,
+		expiresAtMs: null,
+		revokedAtMs: null,
+	};
+	for (const variant of ["index-getter", "iterator", "extra-property", "symbol", "subclass"]) {
+		let executed = 0;
+		let arr = [validRec];
+		if (variant === "index-getter") {
+			Object.defineProperty(arr, "0", { enumerable: true, get() { executed += 1; return validRec; } });
+		}
+		if (variant === "iterator") {
+			arr[Symbol.iterator] = function* () { executed += 1; yield validRec; };
+		}
+		if (variant === "extra-property") arr.extra = Promise.reject(new Error("array extra rejection"));
+		if (variant === "symbol") arr[Symbol("s")] = true;
+		if (variant === "subclass") {
+			class SubArray extends Array {}
+			arr = new SubArray(validRec);
+		}
+		assert.throws(
+			() => createCredentialIssuer({
+				hub: "zorg-hub",
+				verifiers: [verifier],
+				standingCodeStore: { load: () => arr, save() {} },
+				clock,
+				wallClock,
+			}),
+			(err) => err?.code === "code-store-corrupt",
+		);
+		assert.equal(executed, 0, `D54 ${variant} must not invoke array getters/iterators`);
+	}
+
+	// save() throws an object whose afterRename is a getter -> getter is never called, returns code-store-unwritable
+	let afterRenameGetterCalls = 0;
+	const getterErrIssuer = createCredentialIssuer({
+		hub: "zorg-hub",
+		verifiers: [verifier],
+		standingCodeStore: {
+			load: () => [],
+			save() {
+				throw {
+					get afterRename() {
+						afterRenameGetterCalls += 1;
+						throw new Error("afterRename getter called");
+					},
+				};
+			},
+		},
+		clock,
+		wallClock,
+	});
+	const getterSaveRes = await getterErrIssuer.mintStandingCode({ proof: "signin-alice", identity: "alice" });
+	assert.deepEqual(getterSaveRes, { ok: false, code: "code-store-unwritable" });
+	assert.equal(afterRenameGetterCalls, 0, "afterRename getter on thrown save error is never called");
+
+	// Sign-in expiry during async isSignInRevoked in mintStandingCode, listStandingCodes, and revokeStandingCode (F3)
+	for (const method of ["mintStandingCode", "listStandingCodes", "revokeStandingCode"]) {
+		const expClock = createTestClock(100);
+		let armed = false;
+		let checks = 0;
+		const expIssuer = createCredentialIssuer({
 			hub: "zorg-hub",
-			node: "alice.0123456789abcdef",
-		}),
-		{ ok: false, code: "proof-refused" },
-	);
+			verifiers: [{ issuer: "zorg-signin", verify: () => ({ principal: "alice", session: "s1", expiresAt: 110 }) }],
+			clock: expClock,
+			wallClock,
+			async isSignInRevoked() {
+				if (armed) {
+					checks += 1;
+					if (checks === (method === "mintStandingCode" ? 2 : 1)) {
+						expClock.set(110);
+					}
+				}
+				return false;
+			},
+		});
+		const seeded = await expIssuer.mintStandingCode({ proof: "signin-alice", identity: "alice" });
+		assert.equal(seeded.ok, true);
+		armed = true;
+		const expiredRes = await expIssuer[method]({
+			proof: "signin-alice",
+			identity: "alice",
+			codeId: seeded.codeId,
+		});
+		assert.deepEqual(expiredRes, { ok: false, code: "proof-refused" }, `${method} refuses proof expiring during isSignInRevoked`);
+	}
 });

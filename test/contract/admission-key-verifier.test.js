@@ -191,4 +191,90 @@ test("CIss4, CI2, CI6, D10-E2: verifyRedeemed dual redemptionId + exact lifecycl
 	});
 	assert.equal(reallocated.ok, true);
 	assert.notEqual(reallocated.instanceBinding, issued.instanceBinding);
+
+	// 6) AGP AdmissionUseSnapshot shapes: { state: "established", session: { remoteNodeId, localSessionId, authorizationAssociation } }
+	// and { state: "terminal", reachedEstablished: false } / malformed readAdmissionUse shapes (F1, F10)
+	const agpSnapClock = createTestClock(2_000_000);
+	const agpSnapReports = [];
+	const agpSnapIssuer = createCredentialIssuer({
+		hub: "zorg-hub",
+		verifiers: [verifier],
+		clock: agpSnapClock,
+		keyLifetimeMs: 10,
+		keyRetentionMs: 100,
+		reconnectGraceMs: 5,
+		onKeyReuse: (r) => agpSnapReports.push(r),
+	});
+	const snapKey = await agpSnapIssuer.issueAdmissionKey({
+		proof: { kind: "sign-in", token: "alice-token" },
+		hub: "zorg-hub",
+		node: "alice.0123456789abcdef",
+	});
+	let snapObs = {
+		state: "established",
+		session: {
+			remoteNodeId: "alice.0123456789abcdef",
+			localSessionId: "agp-session-42",
+			authorizationAssociation: {
+				mode: "authenticated",
+				issuer: "zorg-signin",
+				principal: "alice",
+				instanceBinding: snapKey.instanceBinding,
+			},
+		},
+	};
+	const snapArrival = {};
+	const snapLook = agpSnapIssuer.resolvePsk(snapKey.pskIdentity, { arrival: snapArrival });
+	const snapUse = {
+		lifecycle: { readAdmissionUse: () => snapObs },
+		control: { requestAdmissionTermination() {} },
+		redemption: { recordAdmissionRedemption: () => ({ kind: "recorded" }) },
+	};
+	assert.equal(
+		agpSnapIssuer.completePskProof({ arrival: snapArrival, use: snapUse }, { arrival: snapArrival, lookupRef: snapLook.lookupRef }),
+		"redeemed",
+	);
+	// Second presentation immediately captures firstSession from AGP session.localSessionId ("agp-session-42")
+	const snapArr2 = {};
+	const snapLook2 = agpSnapIssuer.resolvePsk(snapKey.pskIdentity, { arrival: snapArr2 });
+	assert.equal(
+		agpSnapIssuer.completePskProof(
+			{
+				arrival: snapArr2,
+				use: {
+					lifecycle: { readAdmissionUse: () => ({ state: "pending" }) },
+					control: { requestAdmissionTermination() {} },
+					redemption: { recordAdmissionRedemption: () => ({ kind: "recorded" }) },
+				},
+			},
+			{ arrival: snapArr2, lookupRef: snapLook2.lookupRef },
+		),
+		"refused",
+	);
+	assert.equal(agpSnapReports[0].firstSession, "agp-session-42");
+
+	// Malformed readAdmissionUse return (getter or unknown field) retains the lease
+	snapObs = { state: "terminal", extraField: true };
+	agpSnapClock.advance(20);
+	agpSnapIssuer.sweepLeases();
+	assert.deepEqual(
+		await agpSnapIssuer.issueAdmissionKey({
+			proof: { kind: "sign-in", token: "alice-token" },
+			hub: "zorg-hub",
+			node: "alice.0123456789abcdef",
+		}),
+		{ ok: false, code: "node-identity-conflict" },
+	);
+
+	// Valid AGP { state: "terminal", reachedEstablished: false } reclaims the lease after grace (5ms)
+	snapObs = { state: "terminal", reachedEstablished: false };
+	agpSnapIssuer.sweepLeases();
+	agpSnapClock.advance(5);
+	agpSnapIssuer.sweepLeases();
+	const afterAgpTerminal = await agpSnapIssuer.issueAdmissionKey({
+		proof: { kind: "sign-in", token: "alice-token" },
+		hub: "zorg-hub",
+		node: "alice.0123456789abcdef",
+	});
+	assert.equal(afterAgpTerminal.ok, true);
 });

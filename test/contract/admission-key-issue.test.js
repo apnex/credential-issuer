@@ -309,4 +309,70 @@ test("CIss2, D10-E2: isSignInRevoked rechecked at serialized commit, lease/handl
 		continuationSecret: k1.continuationSecret,
 	});
 	assert.equal(k4.ok, true, "terminal slot compaction released k1's handle reservation");
+
+	// 3) Cross maxActiveLeases (2) and maxRetainedKeys (3) thresholds without live eviction, and test D54/D55 on allowAdmissionKey (F10)
+	const leaseCapIssuer = createCredentialIssuer({
+		hub: "zorg-hub",
+		verifiers,
+		clock: capClock,
+		maxActiveLeases: 2,
+		maxHandlesPerLease: 4,
+		maxTotalHandles: 10,
+		maxRetainedKeys: 3,
+	});
+	const l1 = await leaseCapIssuer.issueAdmissionKey({
+		proof: { kind: "sign-in", token: "alice-a" },
+		hub: "zorg-hub",
+		node: "alice.0000000000000001",
+	});
+	const l2 = await leaseCapIssuer.issueAdmissionKey({
+		proof: { kind: "sign-in", token: "alice-a" },
+		hub: "zorg-hub",
+		node: "alice.0000000000000002",
+	});
+	assert.equal(l1.ok && l2.ok, true);
+	// 3rd distinct node exceeds maxActiveLeases: 2 -> refused with lease-capacity
+	assert.deepEqual(
+		await leaseCapIssuer.issueAdmissionKey({
+			proof: { kind: "sign-in", token: "alice-a" },
+			hub: "zorg-hub",
+			node: "alice.0000000000000003",
+		}),
+		{ ok: false, code: "lease-capacity" },
+	);
+	// Issue 3rd key on existing lease l1 -> hits maxRetainedKeys: 3, so 4th key is refused with lease-capacity
+	const l1b = await leaseCapIssuer.issueAdmissionKey({
+		proof: { kind: "sign-in", token: "alice-a" },
+		hub: "zorg-hub",
+		node: "alice.0000000000000001",
+		continuationSecret: l1.continuationSecret,
+	});
+	assert.equal(l1b.ok, true);
+	assert.deepEqual(
+		await leaseCapIssuer.issueAdmissionKey({
+			proof: { kind: "sign-in", token: "alice-a" },
+			hub: "zorg-hub",
+			node: "alice.0000000000000001",
+			continuationSecret: l1.continuationSecret,
+		}),
+		{ ok: false, code: "lease-capacity" },
+	);
+
+	// D54/D55 on allowAdmissionKey returning non-boolean / nested rejected Promise
+	const badPolicyIssuer = createCredentialIssuer({
+		hub: "zorg-hub",
+		verifiers,
+		clock: capClock,
+		allowAdmissionKey() {
+			return { nested: Promise.reject(new Error("D55 policy rejection")) };
+		},
+	});
+	assert.deepEqual(
+		await badPolicyIssuer.issueAdmissionKey({
+			proof: { kind: "sign-in", token: "alice-a" },
+			hub: "zorg-hub",
+			node: "alice.0000000000000001",
+		}),
+		{ ok: false, code: "policy-refused" },
+	);
 });

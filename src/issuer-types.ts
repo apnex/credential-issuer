@@ -211,11 +211,42 @@ export interface KeyReuseReport {
 	readonly firstSessionStopped: boolean;
 }
 
+/** AGP `AdmissionSessionIdentity` descriptive metadata (`B6`, `D63`, `CIss3`, `CIss4`). */
+export interface AdmissionSessionIdentity {
+	readonly remoteNodeId: string;
+	readonly localSessionId: string;
+	readonly authorizationAssociation?: {
+		readonly mode: "authenticated";
+		readonly issuer: string;
+		readonly principal: string;
+		readonly instanceBinding: string;
+	};
+}
+
+/** AGP `AdmissionUseSnapshot` returned by `AdmissionUseObservation.readAdmissionUse()` (`B6`, `D63`, `CIss3`, `CIss4`). */
+export type AdmissionUseSnapshot =
+	| { readonly state: "pending"; readonly sessionId?: string }
+	| {
+			readonly state: "admitted" | "established";
+			readonly session?: AdmissionSessionIdentity;
+			readonly sessionId?: string;
+	  }
+	| {
+			readonly state: "terminal";
+			readonly reachedEstablished?: false;
+			readonly admittedSession?: never;
+			readonly sessionId?: string;
+	  }
+	| {
+			readonly state: "terminal";
+			readonly reachedEstablished: boolean;
+			readonly admittedSession: AdmissionSessionIdentity;
+			readonly sessionId?: string;
+	  };
+
 /** AGP `AdmissionUseObservation` lifecycle handle (`B6`, `D63`, `CIss3`, `CIss4`). */
 export interface AdmissionUseObservation {
-	readAdmissionUse():
-		| { readonly state: "pending" | "admitted" | "established" | "terminal"; readonly sessionId?: string }
-		| unknown;
+	readAdmissionUse(): AdmissionUseSnapshot | unknown;
 }
 
 /** AGP `AdmissionUseControl` handle (`B6`, `D63`, `CIss3`). */
@@ -225,7 +256,24 @@ export interface AdmissionUseControl {
 
 /** Result of `AdmissionRedemptionPort.recordAdmissionRedemption` (`B6`, `D63`, `CIss3`). */
 export type RecordAdmissionRedemptionResult =
-	| { readonly kind: "recorded" }
+	| {
+			readonly kind: "recorded";
+			readonly context?: {
+				readonly redemptionId: string;
+				readonly lifecycle: AdmissionUseObservation;
+			};
+	  }
+	| {
+			readonly kind: "refused";
+			readonly reason:
+				| "inactive"
+				| "expired"
+				| "authorization-expired"
+				| "already-recorded"
+				| "invalid-redemption"
+				| "invalid-authorization"
+				| "capacity";
+	  }
 	| {
 			readonly kind:
 				| "authorization-expired"
