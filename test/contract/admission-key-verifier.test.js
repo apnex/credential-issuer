@@ -16,6 +16,9 @@ function createTestClock(initialMs = 1_000_000) {
 		advance: (ms) => {
 			nowMs += ms;
 		},
+		set: (ms) => {
+			nowMs = ms;
+		},
 		schedule: () => ({ cancel() {} }),
 	};
 }
@@ -293,4 +296,66 @@ test("CIss4, CI2, CI6, D10-E2: verifyRedeemed dual redemptionId + exact lifecycl
 		node: "alice.0123456789abcdef",
 	});
 	assert.equal(afterAgpTerminal.ok, true);
+
+	// 7) First terminal observation timestamped AFTER readAdmissionUse reflection completes so reconnectGraceMs is never shortened (Attempt 3 F2)
+	const f2Clock = createTestClock(100);
+	const f2Issuer = createCredentialIssuer({
+		hub: "zorg-hub",
+		verifiers: [verifier],
+		clock: f2Clock,
+		keyLifetimeMs: 10,
+		keyRetentionMs: 100,
+		reconnectGraceMs: 5,
+	});
+	const f2Key = await f2Issuer.issueAdmissionKey({
+		proof: { kind: "sign-in", token: "alice-token" },
+		hub: "zorg-hub",
+		node: "alice.0123456789abcdef",
+	});
+	const f2Arr = {};
+	const f2Look = f2Issuer.resolvePsk(f2Key.pskIdentity, { arrival: f2Arr });
+	let f2SweepDelayed = false;
+	f2Issuer.completePskProof(
+		{
+			arrival: f2Arr,
+			use: {
+				lifecycle: {
+					readAdmissionUse() {
+						if (!f2SweepDelayed) return { state: "established", sessionId: "s-f2" };
+						return new Proxy(
+							{ state: "terminal", reachedEstablished: false },
+							{
+								ownKeys(t) {
+									f2Clock.set(115); // reflection completes at 115 while sweep started at 110
+									return Reflect.ownKeys(t);
+								},
+							},
+						);
+					},
+				},
+				control: { requestAdmissionTermination() {} },
+				redemption: { recordAdmissionRedemption: () => ({ kind: "recorded" }) },
+			},
+		},
+		{ arrival: f2Arr, lookupRef: f2Look.lookupRef },
+	);
+	f2Clock.set(110);
+	f2SweepDelayed = true;
+	f2Issuer.sweepLeases(); // terminal observation completes at 115, so grace runs until 115 + 5 = 120
+	f2Clock.set(119); // +4ms after 115 (< 5ms reconnectGraceMs) -> must still refuse with node-identity-conflict
+	assert.deepEqual(
+		await f2Issuer.issueAdmissionKey({
+			proof: { kind: "sign-in", token: "alice-token" },
+			hub: "zorg-hub",
+			node: "alice.0123456789abcdef",
+		}),
+		{ ok: false, code: "node-identity-conflict" },
+	);
+	f2Clock.set(120); // +5ms after 115 -> grace elapsed, lease reclaimed!
+	const f2Reclaimed = await f2Issuer.issueAdmissionKey({
+		proof: { kind: "sign-in", token: "alice-token" },
+		hub: "zorg-hub",
+		node: "alice.0123456789abcdef",
+	});
+	assert.equal(f2Reclaimed.ok, true);
 });

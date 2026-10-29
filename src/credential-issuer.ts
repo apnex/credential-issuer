@@ -81,7 +81,7 @@ interface InternalKeyRecord {
 	readonly issuedAtMonotonicMs: number;
 	readonly validBeforeMonotonicMs: number;
 	readonly retainUntilMonotonicMs: number;
-	state: "unspent" | "spent" | "uncertain";
+	state: "unspent" | "preparing" | "spent" | "uncertain";
 	reservationHeld: boolean;
 	firstUse: InternalUseSlot | null;
 	firstUseSummary: { readonly useId: string; readonly sessionId: string | null } | null;
@@ -238,19 +238,23 @@ async function callBooleanRule(fn: () => unknown): Promise<{ readonly ok: true; 
 }
 
 /**
- * Reads `AdmissionRedemptionPort.recordAdmissionRedemption`'s return value (`F1`, `D54`, `D55`), accepting both
- * AGP's `{ kind: "recorded", context: { redemptionId, lifecycle } }` (preserving exact `lifecycle` capability
- * identity without JSON-serializing its methods) and `{ kind: "recorded" }`, as well as AGP's
- * `{ kind: "refused", reason }` and shorthand `{ kind: <reason> }`.
+ * Reads `AdmissionRedemptionPort.recordAdmissionRedemption`'s return value (`F1`, `F3`, `D54`, `D55`), reading
+ * each own property descriptor at most once and accepting both AGP's `{ kind: "recorded", context: { redemptionId, lifecycle } }`
+ * (preserving exact `lifecycle` capability identity without JSON-serializing its methods) and `{ kind: "recorded" }`,
+ * as well as AGP's `{ kind: "refused", reason }` and shorthand `{ kind: <reason> }`.
  */
 function readRedemptionOutcome(
 	raw: unknown,
 	expectedRedemptionId: string,
 	expectedLifecycle: AdmissionUseObservation,
 ): { readonly outcome: "recorded" } | { readonly outcome: "explicit-refusal"; readonly reason: string } | { readonly outcome: "uncertain" } {
-	const captured: unknown[] = [raw];
+	const capturedValues: unknown[] = [];
+	let rawEnumerated = false;
 	const failUncertain = (): { readonly outcome: "uncertain" } => {
-		for (const item of captured) observePromises(item);
+		if (!rawEnumerated) {
+			observePromises(raw);
+		}
+		for (const item of capturedValues) observePromises(item);
 		return { outcome: "uncertain" };
 	};
 	try {
@@ -265,47 +269,45 @@ function readRedemptionOutcome(
 			return failUncertain();
 		}
 		const names = Object.getOwnPropertyNames(raw);
+		const props = new Map<string, unknown>();
 		for (const name of names) {
 			const desc = Object.getOwnPropertyDescriptor(raw, name);
 			if (desc !== undefined && Object.hasOwn(desc, "value")) {
-				captured.push(desc.value);
+				capturedValues.push(desc.value);
 			}
 			if (desc === undefined || !desc.enumerable || !Object.hasOwn(desc, "value")) {
 				return failUncertain();
 			}
+			props.set(name, desc.value);
 		}
-		const kindDesc = Object.getOwnPropertyDescriptor(raw, "kind");
-		if (kindDesc === undefined || !Object.hasOwn(kindDesc, "value") || typeof kindDesc.value !== "string") {
+		rawEnumerated = true;
+		const kind = props.get("kind");
+		if (typeof kind !== "string") {
 			return failUncertain();
 		}
-		const kind = kindDesc.value;
 
 		if (kind === "recorded") {
 			if (names.length === 1) {
 				return { outcome: "recorded" };
 			}
-			if (names.length === 2 && names.includes("context")) {
-				const ctxDesc = Object.getOwnPropertyDescriptor(raw, "context");
-				if (ctxDesc === undefined || !Object.hasOwn(ctxDesc, "value")) return failUncertain();
-				const ctx = ctxDesc.value;
+			if (names.length === 2 && props.has("context")) {
+				const ctx = props.get("context");
 				if (typeof ctx !== "object" || ctx === null || Array.isArray(ctx)) return failUncertain();
 				const ctxProto = Object.getPrototypeOf(ctx);
 				if (ctxProto !== Object.prototype && ctxProto !== null) return failUncertain();
 				if (Object.getOwnPropertySymbols(ctx).length > 0) return failUncertain();
 				const ctxNames = Object.getOwnPropertyNames(ctx);
 				if (ctxNames.length !== 2) return failUncertain();
+				const ctxProps = new Map<string, unknown>();
 				for (const ck of ctxNames) {
 					const d = Object.getOwnPropertyDescriptor(ctx, ck);
-					if (d !== undefined && Object.hasOwn(d, "value")) captured.push(d.value);
+					if (d !== undefined && Object.hasOwn(d, "value")) capturedValues.push(d.value);
 					if (d === undefined || !d.enumerable || !Object.hasOwn(d, "value")) return failUncertain();
+					ctxProps.set(ck, d.value);
 				}
-				const idDesc = Object.getOwnPropertyDescriptor(ctx, "redemptionId");
-				const lcDesc = Object.getOwnPropertyDescriptor(ctx, "lifecycle");
 				if (
-					idDesc === undefined ||
-					lcDesc === undefined ||
-					idDesc.value !== expectedRedemptionId ||
-					lcDesc.value !== expectedLifecycle
+					ctxProps.get("redemptionId") !== expectedRedemptionId ||
+					ctxProps.get("lifecycle") !== expectedLifecycle
 				) {
 					return failUncertain();
 				}
@@ -314,15 +316,10 @@ function readRedemptionOutcome(
 			return failUncertain();
 		}
 
-		if (kind === "refused" && names.length === 2 && names.includes("reason")) {
-			const reasonDesc = Object.getOwnPropertyDescriptor(raw, "reason");
-			if (
-				reasonDesc !== undefined &&
-				Object.hasOwn(reasonDesc, "value") &&
-				typeof reasonDesc.value === "string" &&
-				EXPLICIT_REDEMPTION_REFUSAL_REASONS.has(reasonDesc.value)
-			) {
-				return { outcome: "explicit-refusal", reason: reasonDesc.value };
+		if (kind === "refused" && names.length === 2 && props.has("reason")) {
+			const reason = props.get("reason");
+			if (typeof reason === "string" && EXPLICIT_REDEMPTION_REFUSAL_REASONS.has(reason)) {
+				return { outcome: "explicit-refusal", reason };
 			}
 			return failUncertain();
 		}
@@ -333,7 +330,7 @@ function readRedemptionOutcome(
 
 		return failUncertain();
 	} catch (error) {
-		captured.push(error);
+		capturedValues.push(error);
 		return failUncertain();
 	}
 }
@@ -601,11 +598,11 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 	};
 
 	const sweepLeases = (): void => {
-		const nowMs = clock.now();
 		for (const [lKey, lease] of activeLeases) {
-			// 1. Poll all slots on the lease.
+			// 1. Poll all slots on the lease, sampling the clock AFTER each readUseObservation completes (F2).
 			for (const [lc, slot] of lease.slots) {
 				const obs = readUseObservation(slot.lifecycle);
+				const obsNowMs = clock.now();
 				const keyRec = retainedKeys.get(slot.redemptionId);
 				if (obs !== "unknown") {
 					if (obs.sessionId !== null) {
@@ -616,10 +613,10 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 					}
 					if (obs.state === "terminal") {
 						if (slot.terminalObservedAtMs === null) {
-							slot.terminalObservedAtMs = nowMs;
-							lease.lastActivityMs = Math.max(lease.lastActivityMs, nowMs);
+							slot.terminalObservedAtMs = obsNowMs;
+							lease.lastActivityMs = Math.max(lease.lastActivityMs, obsNowMs);
 						}
-						if (nowMs >= slot.validBeforeMonotonicMs) {
+						if (obsNowMs >= slot.validBeforeMonotonicMs) {
 							slot.compacted = true;
 							lease.slots.delete(lc);
 							slotsByLifecycle.delete(lc);
@@ -638,13 +635,14 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 				}
 			}
 
+			const leaseNowMs = clock.now();
 			// 2. Release reservations for unspent expired keys on this lease.
 			for (const [, keyRec] of lease.keys) {
-				if (keyRec.state === "unspent" && nowMs >= keyRec.validBeforeMonotonicMs) {
+				if (keyRec.state === "unspent" && leaseNowMs >= keyRec.validBeforeMonotonicMs) {
 					releaseKeyReservation(lease, keyRec);
 				}
 				if (
-					nowMs >= keyRec.retainUntilMonotonicMs &&
+					leaseNowMs >= keyRec.retainUntilMonotonicMs &&
 					keyRec.firstUse === null &&
 					!keyRec.reservationHeld
 				) {
@@ -657,7 +655,7 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			// 3. Check the 4 D62 reclamation conditions together in the same synchronous turn:
 			let hasLiveUnspentKey = false;
 			for (const [, keyRec] of lease.keys) {
-				if (keyRec.state === "unspent" && nowMs < keyRec.validBeforeMonotonicMs) {
+				if ((keyRec.state === "unspent" || keyRec.state === "preparing") && leaseNowMs < keyRec.validBeforeMonotonicMs) {
 					hasLiveUnspentKey = true;
 					break;
 				}
@@ -669,7 +667,7 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 					break;
 				}
 			}
-			const graceElapsed = nowMs - lease.lastActivityMs >= reconnectGraceMs;
+			const graceElapsed = leaseNowMs - lease.lastActivityMs >= reconnectGraceMs;
 
 			if (!hasLiveUnspentKey && !hasNonTerminalSlot && graceElapsed) {
 				for (const [lc, slot] of lease.slots) {
@@ -693,12 +691,13 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 		}
 
 		// 4. Clean up any orphaned retained keys past retainUntilMonotonicMs whose lease was already reclaimed.
+		const finalNowMs = clock.now();
 		for (const [redemptionId, keyRec] of retainedKeys) {
-			if (nowMs >= keyRec.validBeforeMonotonicMs && keyRec.state === "unspent" && keyRec.reservationHeld) {
+			if (finalNowMs >= keyRec.validBeforeMonotonicMs && keyRec.state === "unspent" && keyRec.reservationHeld) {
 				const lease = activeLeases.get(leaseKey(keyRec.hub, keyRec.node));
 				releaseKeyReservation(lease, keyRec);
 			}
-			if (nowMs >= keyRec.retainUntilMonotonicMs && keyRec.firstUse === null && !keyRec.reservationHeld) {
+			if (finalNowMs >= keyRec.retainUntilMonotonicMs && keyRec.firstUse === null && !keyRec.reservationHeld) {
 				retainedKeys.delete(redemptionId);
 				bearerTokensToKeyId.delete(keyRec.bearerToken);
 			}
@@ -1027,7 +1026,10 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			return Object.freeze({ ok: false, code: "policy-refused" });
 		}
 
-		// Serialized commit turn: re-verify proof liveness & revocation.
+		// Serialized commit turn: sweep leases first, then re-verify proof liveness & revocation so any
+		// revocation or clock advancement during sweepLeases() is caught before issuing a key (F5).
+		sweepLeases();
+
 		if (proofKind === "sign-in") {
 			if (verifiedExpiresAt !== null && !(clock.now() < verifiedExpiresAt)) {
 				return Object.freeze({ ok: false, code: "proof-refused" });
@@ -1036,30 +1038,6 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 				return Object.freeze({ ok: false, code: "proof-refused" });
 			}
 			if (verifiedExpiresAt !== null && !(clock.now() < verifiedExpiresAt)) {
-				return Object.freeze({ ok: false, code: "proof-refused" });
-			}
-		} else {
-			if (storeQuarantined) {
-				return Object.freeze({ ok: false, code: "code-store-unwritable" });
-			}
-			const rec = codesByHash.get(codeHashForCommit!);
-			const nowWall = wallClock.nowMs();
-			if (
-				rec === undefined ||
-				rec.revokedAtMs !== null ||
-				(rec.expiresAtMs !== null && nowWall >= rec.expiresAtMs) ||
-				rec.identity !== parsedNode.identity
-			) {
-				return Object.freeze({ ok: false, code: "proof-refused" });
-			}
-		}
-
-		sweepLeases();
-
-		// Re-verify proof liveness after sweepLeases() in case lifecycle polling/reflection advanced the clock (F5).
-		const nowAtIssue = clock.now();
-		if (proofKind === "sign-in") {
-			if (verifiedExpiresAt !== null && !(nowAtIssue < verifiedExpiresAt)) {
 				return Object.freeze({ ok: false, code: "proof-refused" });
 			}
 		} else {
@@ -1076,6 +1054,11 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			) {
 				return Object.freeze({ ok: false, code: "proof-refused" });
 			}
+		}
+
+		const nowAtIssue = clock.now();
+		if (proofKind === "sign-in" && verifiedExpiresAt !== null && !(nowAtIssue < verifiedExpiresAt)) {
+			return Object.freeze({ ok: false, code: "proof-refused" });
 		}
 
 		if (retainedKeys.size >= maxRetainedKeys) {
@@ -1286,7 +1269,7 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 		}
 
 		// 2. Second presentation / key reuse check (CIss3 step 2, o:F2, o:F3, o:F6, F1, F4, F6).
-		if (keyRec.state === "spent" || keyRec.state === "uncertain") {
+		if (keyRec.state === "preparing" || keyRec.state === "spent" || keyRec.state === "uncertain") {
 			keyRec.refusedReuseLifecycles.add(use.lifecycle);
 			const secondUseId = `${generation}-use-${++nextUseId}`;
 			let firstSession: string | null = keyRec.firstUseSummary?.sessionId ?? null;
@@ -1348,7 +1331,8 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			return "refused";
 		}
 
-		// Pre-insert slot in state "prepared" inheriting the key's handle reservation.
+		// Pre-insert slot in state "prepared" and transition keyRec.state to "preparing" BEFORE calling out,
+		// so any synchronous reentrant redemption with a distinct lifecycle is caught as a second presentation (F1).
 		const useId = `${generation}-use-${++nextUseId}`;
 		const slot: InternalUseSlot = {
 			useId,
@@ -1367,6 +1351,9 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			sessionId: null,
 			compacted: false,
 		};
+		keyRec.state = "preparing";
+		keyRec.firstUse = slot;
+		keyRec.firstUseSummary = Object.freeze({ useId, sessionId: null });
 		lease.slots.set(use.lifecycle, slot);
 		slotsByLifecycle.set(use.lifecycle, slot);
 
@@ -1407,6 +1394,9 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 		if (parsedOutcome.outcome === "explicit-refusal") {
 			lease.slots.delete(use.lifecycle);
 			slotsByLifecycle.delete(use.lifecycle);
+			keyRec.state = "unspent";
+			keyRec.firstUse = null;
+			keyRec.firstUseSummary = null;
 			if (parsedOutcome.reason === "expired" || parsedOutcome.reason === "authorization-expired") {
 				if (clock.now() >= keyRec.validBeforeMonotonicMs) {
 					releaseKeyReservation(lease, keyRec);

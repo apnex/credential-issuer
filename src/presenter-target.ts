@@ -85,6 +85,7 @@ function snapshotPrimaryProof(raw: unknown): ClientPrimaryProof {
 			return failProof("getProof() result must not carry symbol properties");
 		}
 		const names = Object.getOwnPropertyNames(raw);
+		const props = new Map<string, unknown>();
 		for (const name of names) {
 			const desc = Object.getOwnPropertyDescriptor(raw, name);
 			if (desc !== undefined && Object.hasOwn(desc, "value")) {
@@ -93,49 +94,41 @@ function snapshotPrimaryProof(raw: unknown): ClientPrimaryProof {
 			if (desc === undefined || !desc.enumerable || !Object.hasOwn(desc, "value")) {
 				return failProof("getProof() properties must be own enumerable data descriptors");
 			}
+			props.set(name, desc.value);
 		}
 		if (names.length !== 2) {
 			return failProof("getProof() result must have exactly two own properties");
 		}
-		const kindDesc = Object.getOwnPropertyDescriptor(raw, "kind");
-		if (kindDesc === undefined || !kindDesc.enumerable || !Object.hasOwn(kindDesc, "value")) {
-			return failProof("getProof() result must have an own enumerable data property kind");
-		}
-		if (kindDesc.value === "sign-in") {
-			const tokenDesc = Object.getOwnPropertyDescriptor(raw, "token");
-			if (tokenDesc === undefined || !tokenDesc.enumerable || !Object.hasOwn(tokenDesc, "value")) {
+		const kind = props.get("kind");
+		if (kind === "sign-in") {
+			if (!props.has("token")) {
 				return failProof("sign-in proof must have an own enumerable data property token");
 			}
-			if (tokenDesc.value === undefined || tokenDesc.value === null) {
+			const tokenVal = props.get("token");
+			if (tokenVal === undefined || tokenVal === null) {
 				return failProof("sign-in proof token must not be null or undefined");
 			}
-			const tokenPlain = readPlainJson(tokenDesc.value);
+			const tokenPlain = readPlainJson(tokenVal);
 			if (!tokenPlain.ok || tokenPlain.value === null) {
 				return failProof("sign-in proof token must be a non-null plain JSON value");
 			}
 			return Object.freeze({ kind: "sign-in", token: tokenPlain.value });
 		}
-		if (kindDesc.value === "standing-code") {
-			const codeDesc = Object.getOwnPropertyDescriptor(raw, "code");
-			if (
-				codeDesc === undefined ||
-				!codeDesc.enumerable ||
-				!Object.hasOwn(codeDesc, "value") ||
-				typeof codeDesc.value !== "string" ||
-				codeDesc.value.length === 0
-			) {
+		if (kind === "standing-code") {
+			const codeVal = props.get("code");
+			if (typeof codeVal !== "string" || codeVal.length === 0) {
 				return failProof("standing-code proof must have a non-empty string code");
 			}
-			return Object.freeze({ kind: "standing-code", code: codeDesc.value });
+			return Object.freeze({ kind: "standing-code", code: codeVal });
 		}
 		return failProof("getProof() kind must be \"sign-in\" or \"standing-code\"");
 	} catch (error) {
-		if (error instanceof TypeError && captured.includes(raw)) {
-			for (const item of captured) observePromises(item);
+		captured.push(error);
+		for (const item of captured) observePromises(item);
+		if (error instanceof TypeError) {
 			throw error;
 		}
-		captured.push(error);
-		return failProof("getProof() threw or failed descriptor inspection");
+		throw new TypeError("getProof() threw or failed descriptor inspection", { cause: error });
 	}
 }
 

@@ -453,4 +453,90 @@ test("CIss3, A2, D72, D10-E2: beginPskArrival compositionSettled sequence across
 	f8Issuer.sweepLeases(); // compacts terminal slot at validBeforeMonotonicMs (110) while key is retained until 200
 	assert.equal(f8Issuer.redeemBearer(f8Use.use, f8Key.bearerToken), "redeemed", "compacted committed lifecycle stays idempotent");
 	assert.equal(f8Reports.length, 0, "no false reuse report after terminal compaction");
+
+	// 7) Reentrant redemption (from recordAdmissionRedemption callback or result Proxy reflection) never admits a second distinct lifecycle (Attempt 3 F1),
+	// and single-pass descriptor reading on recordAdmissionRedemption result refuses changing descriptors and observes rejected Promises (Attempt 3 F3)
+	for (const reentryVariant of ["callback", "reflection"]) {
+		const reIssuer = createCredentialIssuer({
+			hub: "zorg-hub",
+			verifiers: [verifier],
+			clock,
+		});
+		const reKey = await reIssuer.issueAdmissionKey({
+			proof: { kind: "sign-in", token: "alice-token" },
+			hub: "zorg-hub",
+			node: "alice.0123456789abcdef",
+			proofMode: "bearer",
+		});
+		const firstUse = makeUse();
+		const secondUse = makeUse();
+		let nestedOutcome = null;
+		let entered = false;
+		firstUse.use.redemption.recordAdmissionRedemption = (id) => {
+			const res = { kind: "recorded", context: { redemptionId: id, lifecycle: firstUse.use.lifecycle } };
+			if (reentryVariant === "callback") {
+				nestedOutcome = reIssuer.redeemBearer(secondUse.use, reKey.bearerToken);
+				return res;
+			}
+			return new Proxy(res, {
+				ownKeys(t) {
+					if (!entered) {
+						entered = true;
+						nestedOutcome = reIssuer.redeemBearer(secondUse.use, reKey.bearerToken);
+					}
+					return Reflect.ownKeys(t);
+				},
+			});
+		};
+		const outerOutcome = reIssuer.redeemBearer(firstUse.use, reKey.bearerToken);
+		assert.equal(outerOutcome, "redeemed");
+		assert.equal(nestedOutcome, "refused", `reentrant ${reentryVariant} second lifecycle must be refused`);
+		assert.equal(
+			reIssuer.verifyRedeemed({
+				redemptionId: reKey.redemptionId,
+				lifecycle: firstUse.use.lifecycle,
+				remoteNodeId: reKey.node,
+			}).ok,
+			true,
+		);
+		assert.equal(
+			reIssuer.verifyRedeemed({
+				redemptionId: reKey.redemptionId,
+				lifecycle: secondUse.use.lifecycle,
+				remoteNodeId: reKey.node,
+			}).ok,
+			false,
+		);
+	}
+
+	// Single-pass descriptor read on recordAdmissionRedemption result (Attempt 3 F3)
+	const f3Key = await agpIssuer.issueAdmissionKey({
+		proof: { kind: "sign-in", token: "alice-token" },
+		hub: "zorg-hub",
+		node: "alice.0123456789abcdef",
+		proofMode: "bearer",
+		continuationSecret: agpKey.continuationSecret,
+	});
+	let f3KindReads = 0;
+	const f3ChangingUse = makeUse(() =>
+		new Proxy(
+			{ kind: "recorded" },
+			{
+				getOwnPropertyDescriptor(target, prop) {
+					if (prop === "kind") {
+						f3KindReads += 1;
+						return {
+							configurable: true,
+							enumerable: true,
+							value: f3KindReads === 1 ? Promise.reject(new Error("D55 first-read rejection")) : "recorded",
+						};
+					}
+					return Reflect.getOwnPropertyDescriptor(target, prop);
+				},
+			},
+		),
+	);
+	assert.equal(agpIssuer.redeemBearer(f3ChangingUse.use, f3Key.bearerToken), "refused");
+	assert.equal(f3KindReads, 1, "recordAdmissionRedemption result kind descriptor is read only once");
+	await new Promise((r) => setImmediate(r));
 });

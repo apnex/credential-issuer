@@ -282,12 +282,29 @@ test("CIss5, A3, D10-E2: createCredentialPresenterTarget composes with issuer.is
 	await f3Disp;
 	assert.equal(f3Released, 1);
 
-	// Constructor getProof() throwing or returning extra rejected Promise observes the rejection (Attempt 2 F4)
+	// Constructor getProof() throwing or returning extra rejected Promise, or Proxy ownKeys throwing a TypeError with nested rejected Promise, observes the rejection (Attempt 2 F4 & Attempt 3 F4)
 	for (const badGetProof of [
 		() => {
 			throw { nested: Promise.reject(new Error("D55 getProof throw rejection")) };
 		},
 		() => ({ kind: "sign-in", token: "ok", extra: Promise.reject(new Error("D55 getProof extra rejection")) }),
+		() => {
+			let thrownOnce = false;
+			return new Proxy(
+				{ kind: "sign-in", token: "ok" },
+				{
+					ownKeys(t) {
+						if (!thrownOnce) {
+							thrownOnce = true;
+							const te = new TypeError("reflective TypeError");
+							te.nested = Promise.reject(new Error("D55 reflective TypeError rejection"));
+							throw te;
+						}
+						return Reflect.ownKeys(t);
+					},
+				},
+			);
+		},
 	]) {
 		const f4Presenter = createCredentialPresenterTarget({
 			hub: "zorg-hub",

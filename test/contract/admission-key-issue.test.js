@@ -420,4 +420,47 @@ test("CIss2, D10-E2: isSignInRevoked rechecked at serialized commit, lease/handl
 			assert.deepEqual(secondKey, { ok: false, code: "proof-refused" });
 		}
 	}
+
+	// 5) Sign-in revoked synchronously during sweepLeases() lifecycle polling is rechecked before issuing a key (Attempt 3 F5)
+	const f5Clock = createTestClock(100);
+	let f5Revoked = false;
+	let f5RevokeOnSweep = false;
+	const f5Issuer = createCredentialIssuer({
+		hub: "zorg-hub",
+		verifiers: [{ issuer: "authority-a", verify: () => ({ principal: "alice", session: "s-f5", expiresAt: 200 }) }],
+		clock: f5Clock,
+		isSignInRevoked: ({ session }) => session === "s-f5" && f5Revoked,
+	});
+	const f5First = await f5Issuer.issueAdmissionKey({
+		proof: { kind: "sign-in", token: "alice-a" },
+		hub: "zorg-hub",
+		node: "alice.0000000000000001",
+	});
+	const f5Arr = {};
+	const f5Look = f5Issuer.resolvePsk(f5First.pskIdentity, { arrival: f5Arr });
+	f5Issuer.completePskProof(
+		{
+			arrival: f5Arr,
+			use: {
+				lifecycle: {
+					readAdmissionUse() {
+						if (f5RevokeOnSweep) f5Revoked = true;
+						return { state: "established", sessionId: "s-1" };
+					},
+				},
+				control: { requestAdmissionTermination() {} },
+				redemption: { recordAdmissionRedemption: () => ({ kind: "recorded" }) },
+			},
+		},
+		{ arrival: f5Arr, lookupRef: f5Look.lookupRef },
+	);
+	f5RevokeOnSweep = true;
+	assert.deepEqual(
+		await f5Issuer.issueAdmissionKey({
+			proof: { kind: "sign-in", token: "alice-a" },
+			hub: "zorg-hub",
+			node: "alice.0000000000000002",
+		}),
+		{ ok: false, code: "proof-refused" },
+	);
 });
