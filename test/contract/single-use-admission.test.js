@@ -539,4 +539,53 @@ test("CIss3, A2, D72, D10-E2: beginPskArrival compositionSettled sequence across
 	assert.equal(agpIssuer.redeemBearer(f3ChangingUse.use, f3Key.bearerToken), "refused");
 	assert.equal(f3KindReads, 1, "recordAdmissionRedemption result kind descriptor is read only once");
 	await new Promise((r) => setImmediate(r));
+
+	// 8) Reentrant sweepLeases() called inside readAdmissionUse() during second-presentation reuse never throws and emits the reuse report (Attempt 4 F2)
+	for (const mode of ["bearer", "native-tls13-external-psk-v1"]) {
+		const f2Clock = createTestClock(100);
+		const f2Reports = [];
+		const f2Issuer = createCredentialIssuer({
+			hub: "zorg-hub",
+			verifiers: [verifier],
+			clock: f2Clock,
+			keyLifetimeMs: 10,
+			keyRetentionMs: 100,
+			onKeyReuse: (r) => f2Reports.push(r),
+		});
+		const f2Key = await f2Issuer.issueAdmissionKey({
+			proof: { kind: "sign-in", token: "alice-token" },
+			hub: "zorg-hub",
+			node: "alice.0123456789abcdef",
+			proofMode: mode,
+		});
+		let f2SweepEntered = false;
+		const f2Use1 = makeUse({ kind: "recorded" });
+		const completeOn = (u) => {
+			if (mode === "bearer") return f2Issuer.redeemBearer(u, f2Key.bearerToken);
+			const arr = {};
+			const look = f2Issuer.resolvePsk(f2Key.pskIdentity, { arrival: arr });
+			return f2Issuer.completePskProof({ arrival: arr, use: u }, { arrival: arr, lookupRef: look.lookupRef });
+		};
+		assert.equal(completeOn(f2Use1.use), "redeemed");
+		f2Clock.set(110);
+		f2Use1.use.lifecycle.readAdmissionUse = () => {
+			const term = {
+				state: "terminal",
+				reachedEstablished: true,
+				admittedSession: {
+					remoteNodeId: "alice.0123456789abcdef",
+					localSessionId: "session-reentrant-sweep",
+				},
+			};
+			if (!f2SweepEntered) {
+				f2SweepEntered = true;
+				f2Issuer.sweepLeases();
+			}
+			return term;
+		};
+		assert.equal(completeOn(makeUse().use), "refused");
+		assert.equal(f2Reports.length, 1);
+		assert.equal(f2Reports[0].firstSession, "session-reentrant-sweep");
+		assert.equal(f2Reports[0].firstSessionStopped, false);
+	}
 });

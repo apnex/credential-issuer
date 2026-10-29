@@ -42,6 +42,7 @@ import {
 	isValidIssuer,
 	isValidPrintableAsciiPskIdentity,
 	parseNodeId,
+	readExactUint8Array,
 	sha256Hex,
 	utf8Bytes,
 } from "./sha256.js";
@@ -393,11 +394,13 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 		throw new TypeError("options.randomBytes must be a function (byteLength: number) => Uint8Array");
 	}
 	const drawRandomBytes = (byteLength: number): Uint8Array => {
-		const bytes = randomBytesFn(byteLength);
-		if (!(bytes instanceof Uint8Array) || bytes.byteLength !== byteLength) {
-			throw new TypeError(`randomBytes(${byteLength}) must return a Uint8Array of exact byteLength ${byteLength}`);
+		const rawBytes = randomBytesFn(byteLength);
+		const copied = readExactUint8Array(rawBytes, byteLength);
+		if (copied === null) {
+			observePromises(rawBytes);
+			throw new TypeError(`randomBytes(${byteLength}) must return a genuine Uint8Array of exact byteLength ${byteLength}`);
 		}
-		return new Uint8Array(bytes);
+		return copied;
 	};
 
 	const standingCodeStore: StandingCodeStore = options.standingCodeStore ?? createMemoryStandingCodeStore();
@@ -709,19 +712,33 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			standingCodeStore.save(nextRecords);
 			return "ok";
 		} catch (error) {
-			observePromises(error);
+			// Inspect own descriptors of `error` in a single pass so `afterRename` is read at most once (Attempt 4 F1).
 			if (typeof error === "object" && error !== null) {
+				let isPromise = false;
 				try {
-					const desc = Object.getOwnPropertyDescriptor(error, "afterRename");
-					if (desc !== undefined && Object.hasOwn(desc, "value")) {
-						observePromises(desc.value);
-						if (desc.enumerable === true && desc.value === true) {
-							storeQuarantined = true;
+					isPromise = error instanceof Promise;
+				} catch (instErr) {
+					observePromises(instErr);
+				}
+				if (isPromise) {
+					observePromises(error);
+					return "unwritable";
+				}
+				const capturedErrorValues: unknown[] = [];
+				try {
+					for (const name of Object.getOwnPropertyNames(error)) {
+						const desc = Object.getOwnPropertyDescriptor(error, name);
+						if (desc !== undefined && Object.hasOwn(desc, "value")) {
+							capturedErrorValues.push(desc.value);
+							if (name === "afterRename" && desc.enumerable === true && desc.value === true) {
+								storeQuarantined = true;
+							}
 						}
 					}
 				} catch (descErr) {
-					observePromises(descErr);
+					capturedErrorValues.push(descErr);
 				}
+				for (const item of capturedErrorValues) observePromises(item);
 			}
 			return "unwritable";
 		}
@@ -786,13 +803,16 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 		if (storeQuarantined) {
 			return Object.freeze({ ok: false, code: "code-store-unwritable" });
 		}
+		const codeSecretBytes = drawRandomBytes(32);
+		const codeIdBytes = drawRandomBytes(8);
+		if (verified.expiresAt !== null && !(clock.now() < verified.expiresAt)) {
+			return Object.freeze({ ok: false, code: "proof-refused" });
+		}
 		const commitWall = wallClock.nowMs();
 		if (expiresAtMs !== undefined && expiresAtMs !== null && expiresAtMs <= commitWall) {
 			return Object.freeze({ ok: false, code: "invalid-expiry" });
 		}
 
-		const codeSecretBytes = drawRandomBytes(32);
-		const codeIdBytes = drawRandomBytes(8);
 		const code = `ci_code_${bytesToHex(codeSecretBytes)}`;
 		const codeId = `sc_${bytesToHex(codeIdBytes)}`;
 		const codeHash = sha256Hex(code);
@@ -1089,13 +1109,24 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			if (lease.reservedHandles >= maxHandlesPerLease || totalReservedHandles >= maxTotalHandles) {
 				return Object.freeze({ ok: false, code: "lease-capacity" });
 			}
+			const secretBytes = drawRandomBytes(32);
+			const nowAtIssue = clock.now();
+			if (proofKind === "sign-in" && verifiedExpiresAt !== null && !(nowAtIssue < verifiedExpiresAt)) {
+				return Object.freeze({ ok: false, code: "proof-refused" });
+			}
 			lease.lastActivityMs = Math.max(lease.lastActivityMs, nowAtIssue);
 			returnedContinuationSecret = request.continuationSecret;
+			return finishKeyIssuance(lease, secretBytes, nowAtIssue, returnedContinuationSecret);
 		} else {
 			if (activeLeases.size >= maxActiveLeases || totalReservedHandles >= maxTotalHandles) {
 				return Object.freeze({ ok: false, code: "lease-capacity" });
 			}
 			const contBytes = drawRandomBytes(32);
+			const secretBytes = drawRandomBytes(32);
+			const nowAtIssue = clock.now();
+			if (proofKind === "sign-in" && verifiedExpiresAt !== null && !(nowAtIssue < verifiedExpiresAt)) {
+				return Object.freeze({ ok: false, code: "proof-refused" });
+			}
 			const freshContinuationSecret = `ci_cont_${bytesToHex(contBytes)}`;
 			const continuationSecretHash = sha256Hex(freshContinuationSecret);
 			const instanceBinding = `${generation}-${++nextAllocationId}`;
@@ -1113,74 +1144,81 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			};
 			activeLeases.set(lKey, lease);
 			returnedContinuationSecret = freshContinuationSecret;
+			return finishKeyIssuance(lease, secretBytes, nowAtIssue, returnedContinuationSecret);
 		}
 
-		const secretBytes = drawRandomBytes(32);
-		const secretHex = bytesToHex(secretBytes);
-		const redemptionId = `${generation}-${++nextKeyId}`;
-		const bearerToken = `ci_key_${redemptionId}_${secretHex}`;
-		const keyFingerprint = sha256Hex(`${redemptionId}:${secretHex}`);
-		const validBeforeMonotonicMs = nowAtIssue + keyLifetimeMs;
-		const retainUntilMonotonicMs = nowAtIssue + keyRetentionMs;
+		function finishKeyIssuance(
+			targetLease: InternalNodeLease,
+			secretBytes: Uint8Array,
+			nowAtIssue: number,
+			contSecret: string,
+		): IssueAdmissionKeyResult {
+			const secretHex = bytesToHex(secretBytes);
+			const redemptionId = `${generation}-${++nextKeyId}`;
+			const bearerToken = `ci_key_${redemptionId}_${secretHex}`;
+			const keyFingerprint = sha256Hex(`${redemptionId}:${secretHex}`);
+			const validBeforeMonotonicMs = nowAtIssue + keyLifetimeMs;
+			const retainUntilMonotonicMs = nowAtIssue + keyRetentionMs;
 
-		lease.reservedHandles += 1;
-		totalReservedHandles += 1;
+			targetLease.reservedHandles += 1;
+			totalReservedHandles += 1;
 
-		const keyRec: InternalKeyRecord = {
-			redemptionId,
-			generation,
-			secret: new Uint8Array(secretBytes),
-			secretHex,
-			bearerToken,
-			keyFingerprint,
-			proofMode,
-			issuer,
-			principal,
-			hub,
-			node: request.node,
-			instanceBinding: lease.instanceBinding,
-			issuedAtMonotonicMs: nowAtIssue,
-			validBeforeMonotonicMs,
-			retainUntilMonotonicMs,
-			state: "unspent",
-			reservationHeld: true,
-			firstUse: null,
-			firstUseSummary: null,
-			committedLifecycles: new WeakSet(),
-			uncertainLifecycles: new WeakSet(),
-			refusedReuseLifecycles: new WeakSet(),
-		};
-		lease.keys.set(redemptionId, keyRec);
-		retainedKeys.set(redemptionId, keyRec);
-		bearerTokensToKeyId.set(bearerToken, redemptionId);
+			const keyRec: InternalKeyRecord = {
+				redemptionId,
+				generation,
+				secret: new Uint8Array(secretBytes),
+				secretHex,
+				bearerToken,
+				keyFingerprint,
+				proofMode,
+				issuer,
+				principal,
+				hub,
+				node: request.node,
+				instanceBinding: targetLease.instanceBinding,
+				issuedAtMonotonicMs: nowAtIssue,
+				validBeforeMonotonicMs,
+				retainUntilMonotonicMs,
+				state: "unspent",
+				reservationHeld: true,
+				firstUse: null,
+				firstUseSummary: null,
+				committedLifecycles: new WeakSet(),
+				uncertainLifecycles: new WeakSet(),
+				refusedReuseLifecycles: new WeakSet(),
+			};
+			targetLease.keys.set(redemptionId, keyRec);
+			retainedKeys.set(redemptionId, keyRec);
+			bearerTokensToKeyId.set(bearerToken, redemptionId);
 
-		const claims = Object.freeze({
-			iss: issuer,
-			sub: principal,
-			aud: hub,
-			client_id: request.node,
-			jti: redemptionId,
-			exp: Math.floor(validBeforeMonotonicMs / 1000),
-		});
+			const claims = Object.freeze({
+				iss: issuer,
+				sub: principal,
+				aud: hub,
+				client_id: request.node,
+				jti: redemptionId,
+				exp: Math.floor(validBeforeMonotonicMs / 1000),
+			});
 
-		return Object.freeze({
-			ok: true,
-			redemptionId,
-			pskIdentity: redemptionId,
-			secret: new Uint8Array(secretBytes),
-			secretHex,
-			bearerToken,
-			proofMode,
-			issuer,
-			principal,
-			hub,
-			node: request.node,
-			instanceBinding: lease.instanceBinding,
-			continuationSecret: returnedContinuationSecret,
-			issuedAtMonotonicMs: nowAtIssue,
-			validBeforeMonotonicMs,
-			claims,
-		});
+			return Object.freeze({
+				ok: true,
+				redemptionId,
+				pskIdentity: redemptionId,
+				secret: new Uint8Array(secretBytes),
+				secretHex,
+				bearerToken,
+				proofMode,
+				issuer,
+				principal,
+				hub,
+				node: request.node,
+				instanceBinding: targetLease.instanceBinding,
+				continuationSecret: contSecret,
+				issuedAtMonotonicMs: nowAtIssue,
+				validBeforeMonotonicMs,
+				claims,
+			});
+		}
 	};
 
 	const resolvePsk = (pskIdentity: string, attempt?: { readonly arrival?: object }): ResolvePskResult => {
@@ -1268,28 +1306,32 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			return "refused";
 		}
 
-		// 2. Second presentation / key reuse check (CIss3 step 2, o:F2, o:F3, o:F6, F1, F4, F6).
+		// 2. Second presentation / key reuse check (CIss3 step 2, o:F2, o:F3, o:F6, F1, F4, F6, Attempt 4 F2).
 		if (keyRec.state === "preparing" || keyRec.state === "spent" || keyRec.state === "uncertain") {
 			keyRec.refusedReuseLifecycles.add(use.lifecycle);
 			const secondUseId = `${generation}-use-${++nextUseId}`;
+			const firstUseSlot = keyRec.firstUse;
+			const firstUseId = firstUseSlot?.useId ?? keyRec.firstUseSummary?.useId ?? `${generation}-use-0`;
 			let firstSession: string | null = keyRec.firstUseSummary?.sessionId ?? null;
-			if (keyRec.firstUse !== null) {
-				const obs = readUseObservation(keyRec.firstUse.lifecycle);
+			if (firstUseSlot !== null) {
+				const obs = readUseObservation(firstUseSlot.lifecycle);
 				if (obs !== "unknown" && obs.sessionId !== null) {
 					firstSession = obs.sessionId;
-					keyRec.firstUse.sessionId = obs.sessionId;
+					firstUseSlot.sessionId = obs.sessionId;
 					keyRec.firstUseSummary = Object.freeze({
-						useId: keyRec.firstUse.useId,
+						useId: firstUseSlot.useId,
 						sessionId: obs.sessionId,
 					});
+				} else if (keyRec.firstUseSummary?.sessionId !== null && keyRec.firstUseSummary?.sessionId !== undefined) {
+					firstSession = keyRec.firstUseSummary.sessionId;
 				}
 			}
 			// Sample clock AFTER readUseObservation so an observation that crosses expiry never authorizes termination (F6).
 			const nowMs = clock.now();
 			const live = nowMs < keyRec.validBeforeMonotonicMs;
 			let firstSessionStopped = false;
-			if (live && keyRec.firstUse !== null) {
-				const firstControl = keyRec.firstUse.control;
+			if (live && firstUseSlot !== null) {
+				const firstControl = firstUseSlot.control;
 				callVoidHook(() => firstControl.requestAdmissionTermination());
 				firstSessionStopped = true;
 			}
@@ -1301,7 +1343,7 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 					issuer: keyRec.issuer,
 					hub: keyRec.hub,
 					node: keyRec.node,
-					firstUseId: keyRec.firstUseSummary?.useId ?? `${generation}-use-0`,
+					firstUseId,
 					secondUseId,
 					firstSession,
 					secondSession: null,

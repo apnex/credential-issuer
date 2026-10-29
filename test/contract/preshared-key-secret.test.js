@@ -125,4 +125,30 @@ test("CIss2, CIss3, A1, A2, D10-E2: 32-byte randomBytes(32) PSK secret, printabl
 		}),
 		{ ok: false, code: "incompatible-psk-identity" },
 	);
+
+	// Shadowed byteLength on randomBytes(32) return is rejected with TypeError (Attempt 4 F3)
+	let shadowedCalls = 0;
+	const shadowedRandomIssuer = createCredentialIssuer({
+		hub: "zorg-hub",
+		verifiers: [verifier],
+		clock,
+		randomBytes(len) {
+			shadowedCalls += 1;
+			if (shadowedCalls === 3) {
+				const shortArr = new Uint8Array(31);
+				Object.defineProperty(shortArr, "byteLength", { value: 32 });
+				return shortArr;
+			}
+			return new Uint8Array(len);
+		},
+	});
+	await assert.rejects(
+		() =>
+			shadowedRandomIssuer.issueAdmissionKey({
+				proof: { kind: "sign-in", token: "alice-token" },
+				hub: "zorg-hub",
+				node: "alice.0123456789abcdef",
+			}),
+		TypeError,
+	);
 });

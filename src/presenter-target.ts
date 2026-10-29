@@ -24,6 +24,7 @@ import {
 	isValidIssuer,
 	isValidPrintableAsciiPskIdentity,
 	parseNodeId,
+	readExactUint8Array,
 } from "./sha256.js";
 
 const EXPLICIT_REFUSAL_CODES = new Set<IssueAdmissionKeyRefusalCode>([
@@ -204,10 +205,11 @@ function readIssueKeyResult(
 			}
 			if (key === "secret") {
 				hadSecretProp = true;
-				if (!(desc.value instanceof Uint8Array) || desc.value.byteLength !== 32) {
+				const copiedSecret = readExactUint8Array(desc.value, 32);
+				if (copiedSecret === null) {
 					return failUnavailable("malformed-psk-secret");
 				}
-				extractedSecretBytes = new Uint8Array(desc.value);
+				extractedSecretBytes = copiedSecret;
 			} else {
 				Object.defineProperty(plainCandidate, key, {
 					value: desc.value,

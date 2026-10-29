@@ -420,6 +420,61 @@ test("CIss1, D10-E2: createFileStandingCodeStore persistence across restart, sym
 	assert.deepEqual(getterSaveRes, { ok: false, code: "code-store-unwritable" });
 	assert.equal(afterRenameGetterCalls, 0, "afterRename getter on thrown save error is never called");
 
+	// Single-pass afterRename descriptor read on thrown save error (Attempt 4 F1)
+	const changingMem = createMemoryStandingCodeStore();
+	let changingArmed = false;
+	let afterRenameReads = 0;
+	const changingStore = {
+		load: () => changingMem.load(),
+		save(recs) {
+			changingMem.save(recs);
+			if (changingArmed) {
+				throw new Proxy(
+					{ afterRename: true },
+					{
+						getOwnPropertyDescriptor(target, name) {
+							if (name === "afterRename") {
+								afterRenameReads += 1;
+								return {
+									enumerable: true,
+									configurable: true,
+									value: afterRenameReads === 1,
+								};
+							}
+							return Reflect.getOwnPropertyDescriptor(target, name);
+						},
+					},
+				);
+			}
+		},
+	};
+	const changingIssuer = createCredentialIssuer({
+		hub: "zorg-hub",
+		verifiers: [verifier],
+		standingCodeStore: changingStore,
+		clock,
+		wallClock,
+	});
+	const changingMint = await changingIssuer.mintStandingCode({ proof: "signin-alice", identity: "alice" });
+	assert.equal(changingMint.ok, true);
+	changingArmed = true;
+	const changingRevoke = await changingIssuer.revokeStandingCode({
+		proof: "signin-alice",
+		codeId: changingMint.codeId,
+	});
+	assert.deepEqual(changingRevoke, { ok: false, code: "code-store-unwritable" });
+	assert.equal(afterRenameReads, 1, "afterRename descriptor is read at most once");
+	assert.deepEqual(
+		await changingIssuer.issueAdmissionKey({
+			grantType: "client_credentials",
+			clientSecret: changingMint.code,
+			hub: "zorg-hub",
+			node: "alice.0123456789abcdef",
+		}),
+		{ ok: false, code: "code-store-unwritable" },
+		"changing-proxy post-rename failure quarantines the store",
+	);
+
 	// Sign-in expiry during async isSignInRevoked in mintStandingCode, listStandingCodes, and revokeStandingCode (F3)
 	for (const method of ["mintStandingCode", "listStandingCodes", "revokeStandingCode"]) {
 		const expClock = createTestClock(100);

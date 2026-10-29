@@ -465,6 +465,40 @@ test("CIss5, A3, A4, D10-E2: classification of issuer-unavailable vs issuer-refu
 		await attempt.dispose();
 	}
 
+	// Shadowed 31-byte Uint8Array secret and own byteLength getter on in-process secret are rejected without calling the getter (Attempt 4 F3)
+	let secretByteLengthGetterCalls = 0;
+	const shadowed31 = new Uint8Array(31).fill(7);
+	Object.defineProperty(shadowed31, "byteLength", { value: 32 });
+	const getter32 = new Uint8Array(32).fill(7);
+	Object.defineProperty(getter32, "byteLength", {
+		get() {
+			secretByteLengthGetterCalls += 1;
+			return 32;
+		},
+	});
+	for (const badSecretBytes of [shadowed31, getter32]) {
+		currentResponse = {
+			ok: true,
+			redemptionId: "g1-1",
+			pskIdentity: "g1-1",
+			secret: badSecretBytes,
+			bearerToken: "ci_key_g1-1",
+			proofMode: "native-tls13-external-psk-v1",
+			issuer: "zorg-signin",
+			principal: "alice",
+			hub: "zorg-hub",
+			node: "alice.0123456789abcdef",
+			instanceBinding: "g1-1",
+			continuationSecret: "ci_cont_1",
+			validBeforeMonotonicMs: clock.now() + 60_000,
+		};
+		const attempt = presenter.createCredentialAttempt(undefined, { releaseUnused() {} });
+		const res = await attempt.prepareCredential();
+		assert.equal(res.kind, "issuer-unavailable");
+		await attempt.dispose();
+	}
+	assert.equal(secretByteLengthGetterCalls, 0, "D54 must not invoke own byteLength getter on secret");
+
 	// Plain-JSON wire response carrying only secretHex (without Uint8Array secret) is decoded into a 32-byte Uint8Array (o:F1)
 	currentResponse = {
 		ok: true,

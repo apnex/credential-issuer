@@ -43,6 +43,35 @@ export function hexToBytes(hex: unknown, expectedByteLength?: number): Uint8Arra
 	return out;
 }
 
+const TYPED_ARRAY_PROTO = Object.getPrototypeOf(Uint8Array.prototype);
+const TYPED_ARRAY_BYTE_LENGTH_GETTER = Object.getOwnPropertyDescriptor(TYPED_ARRAY_PROTO, "byteLength")!.get!;
+
+/**
+ * Validates that `value` is a genuine `Uint8Array` (`Object.getPrototypeOf(value) === Uint8Array.prototype`)
+ * with no extra or shadowed own properties (such as a shadowed `byteLength` getter or data property) and
+ * exact internal `[[ByteLength]] === expectedByteLength`, returning a fresh `Uint8Array(expectedByteLength)`
+ * copy without invoking any getter or `Symbol.iterator` (`F3`, `D54`).
+ */
+export function readExactUint8Array(value: unknown, expectedByteLength: number): Uint8Array | null {
+	if (typeof value !== "object" || value === null) return null;
+	try {
+		if (Object.getPrototypeOf(value) !== Uint8Array.prototype) return null;
+		const actualLen = Reflect.apply(TYPED_ARRAY_BYTE_LENGTH_GETTER, value, []) as number;
+		if (actualLen !== expectedByteLength) return null;
+		if (Object.getOwnPropertySymbols(value).length > 0) return null;
+		const ownNames = Object.getOwnPropertyNames(value);
+		if (ownNames.length !== expectedByteLength) return null;
+		const out = new Uint8Array(expectedByteLength);
+		const src = value as Uint8Array;
+		for (let i = 0; i < expectedByteLength; i++) {
+			out[i] = src[i]!;
+		}
+		return out;
+	} catch {
+		return null;
+	}
+}
+
 /** Computes the 64-character lowercase hexadecimal SHA-256 digest of a UTF-8 string or `Uint8Array`. */
 export function sha256Hex(input: string | Uint8Array): string {
 	const msg = typeof input === "string" ? utf8Bytes(input) : input;
