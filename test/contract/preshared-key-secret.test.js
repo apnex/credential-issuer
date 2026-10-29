@@ -151,4 +151,38 @@ test("CIss2, CIss3, A1, A2, D10-E2: 32-byte randomBytes(32) PSK secret, printabl
 			}),
 		TypeError,
 	);
+
+	// One-shot Proxy getPrototypeOf throw with nested rejected Promise on randomBytes(32) return is observed by readExactUint8Array (Attempt 5 F2)
+	let proxyRandomCalls = 0;
+	const proxyRandomIssuer = createCredentialIssuer({
+		hub: "zorg-hub",
+		verifiers: [verifier],
+		clock,
+		randomBytes(len) {
+			proxyRandomCalls += 1;
+			if (proxyRandomCalls === 3) {
+				let thrownOnce = false;
+				return new Proxy(new Uint8Array(len), {
+					getPrototypeOf(t) {
+						if (!thrownOnce) {
+							thrownOnce = true;
+							throw { nested: Promise.reject(new Error("D55 randomBytes secret reflection rejection")) };
+						}
+						return Reflect.getPrototypeOf(t);
+					},
+				});
+			}
+			return new Uint8Array(len);
+		},
+	});
+	await assert.rejects(
+		() =>
+			proxyRandomIssuer.issueAdmissionKey({
+				proof: { kind: "sign-in", token: "alice-token" },
+				hub: "zorg-hub",
+				node: "alice.0123456789abcdef",
+			}),
+		TypeError,
+	);
+	await new Promise((r) => setImmediate(r));
 });

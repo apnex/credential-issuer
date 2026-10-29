@@ -588,4 +588,65 @@ test("CIss3, A2, D72, D10-E2: beginPskArrival compositionSettled sequence across
 		assert.equal(f2Reports[0].firstSession, "session-reentrant-sweep");
 		assert.equal(f2Reports[0].firstSessionStopped, false);
 	}
+
+	// 9) Reentrant carrierAcquisitionSettled() called during completePskProof (from recordAdmissionRedemption or result reflection)
+	// waits for completePskProof to return before calling requestAdmissionTermination and finishAdmissionAcquisition (Attempt 5 F3)
+	for (const mode of ["callback", "reflection"]) {
+		const f3Events = [];
+		const f3Key = await issuer.issueAdmissionKey({
+			proof: { kind: "sign-in", token: "alice-token" },
+			hub: "zorg-hub",
+			node: "alice.0123456789abcdef",
+			continuationSecret: keyNoChan.continuationSecret,
+		});
+		let f3Attempt;
+		let f3Once = false;
+		const f3Use = {
+			lifecycle: { readAdmissionUse: () => ({ state: "pending" }) },
+			control: {
+				requestAdmissionTermination() {
+					f3Events.push("termination");
+				},
+			},
+			redemption: {
+				recordAdmissionRedemption(id) {
+					f3Events.push("recorded");
+					if (mode === "callback") {
+						f3Attempt.carrierAcquisitionSettled();
+						f3Events.push("record-return");
+						return { kind: "recorded", context: { redemptionId: id, lifecycle: f3Use.lifecycle } };
+					}
+					return new Proxy(
+						{ kind: "recorded", context: { redemptionId: id, lifecycle: f3Use.lifecycle } },
+						{
+							getOwnPropertyDescriptor(t, name) {
+								if (!f3Once) {
+									f3Once = true;
+									f3Events.push("reflection-enter");
+									f3Attempt.carrierAcquisitionSettled();
+									f3Events.push("reflection-return");
+								}
+								return Reflect.getOwnPropertyDescriptor(t, name);
+							},
+						},
+					);
+				},
+			},
+			finishAdmissionAcquisition() {
+				f3Events.push("finish");
+			},
+		};
+		f3Attempt = issuer.beginPskArrival(
+			{ reserveAdmissionUse: () => ({ kind: "reserved", use: f3Use }) },
+			{ acceptAdmission() {} },
+			{},
+		);
+		const f3Look = f3Attempt.resolvePsk(f3Key.pskIdentity);
+		const f3Out = f3Attempt.completePskProof({ arrival: f3Attempt.arrival, lookupRef: f3Look.lookupRef });
+		f3Events.push("proof-return");
+		await f3Attempt.settled;
+		assert.equal(f3Out, "redeemed");
+		assert.ok(f3Events.indexOf("termination") > f3Events.indexOf("proof-return"), JSON.stringify(f3Events));
+		assert.ok(f3Events.indexOf("finish") > f3Events.indexOf("proof-return"), JSON.stringify(f3Events));
+	}
 });

@@ -1,6 +1,7 @@
 /**
  * Runtime-neutral SHA-256, hexadecimal encoding/decoding, UTF-8 encoding, and identifier validation (`CIss1` to `CIss5`).
  */
+import { observePromises } from "@apnex/shape-check";
 
 const K = new Uint32Array([
 	0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
@@ -67,7 +68,8 @@ export function readExactUint8Array(value: unknown, expectedByteLength: number):
 			out[i] = src[i]!;
 		}
 		return out;
-	} catch {
+	} catch (error) {
+		observePromises(error);
 		return null;
 	}
 }

@@ -1093,6 +1093,29 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			return Object.freeze({ ok: false, code: "incompatible-psk-identity" });
 		}
 
+		const checkProofStillLiveAfterRandom = (nowAtIssue: number): IssueAdmissionKeyResult | null => {
+			if (proofKind === "sign-in") {
+				if (verifiedExpiresAt !== null && !(nowAtIssue < verifiedExpiresAt)) {
+					return Object.freeze({ ok: false, code: "proof-refused" });
+				}
+				return null;
+			}
+			if (storeQuarantined) {
+				return Object.freeze({ ok: false, code: "code-store-unwritable" });
+			}
+			const recNow = codesByHash.get(codeHashForCommit!);
+			const nowWall = wallClock.nowMs();
+			if (
+				recNow === undefined ||
+				recNow.revokedAtMs !== null ||
+				(recNow.expiresAtMs !== null && nowWall >= recNow.expiresAtMs) ||
+				recNow.identity !== parsedNode.identity
+			) {
+				return Object.freeze({ ok: false, code: "proof-refused" });
+			}
+			return null;
+		};
+
 		const lKey = leaseKey(hub, request.node);
 		let lease = activeLeases.get(lKey);
 		let returnedContinuationSecret: string;
@@ -1111,8 +1134,9 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			}
 			const secretBytes = drawRandomBytes(32);
 			const nowAtIssue = clock.now();
-			if (proofKind === "sign-in" && verifiedExpiresAt !== null && !(nowAtIssue < verifiedExpiresAt)) {
-				return Object.freeze({ ok: false, code: "proof-refused" });
+			const expiredAfterRandom = checkProofStillLiveAfterRandom(nowAtIssue);
+			if (expiredAfterRandom !== null) {
+				return expiredAfterRandom;
 			}
 			lease.lastActivityMs = Math.max(lease.lastActivityMs, nowAtIssue);
 			returnedContinuationSecret = request.continuationSecret;
@@ -1124,8 +1148,9 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			const contBytes = drawRandomBytes(32);
 			const secretBytes = drawRandomBytes(32);
 			const nowAtIssue = clock.now();
-			if (proofKind === "sign-in" && verifiedExpiresAt !== null && !(nowAtIssue < verifiedExpiresAt)) {
-				return Object.freeze({ ok: false, code: "proof-refused" });
+			const expiredAfterRandom = checkProofStillLiveAfterRandom(nowAtIssue);
+			if (expiredAfterRandom !== null) {
+				return expiredAfterRandom;
 			}
 			const freshContinuationSecret = `ci_cont_${bytesToHex(contBytes)}`;
 			const continuationSecretHash = sha256Hex(freshContinuationSecret);
@@ -1530,6 +1555,9 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 
 		let currentLookupRef: object | undefined;
 		let proofOutcome: "none" | "redeemed" | "refused" = "none";
+		let proofAttempted = false;
+		let proofInFlightCount = 0;
+		let reentrantCarrierSettledDuringProof = false;
 		let channelAccepted = false;
 		let hostStepSettled = false;
 		let carrierSettled = false;
@@ -1553,7 +1581,7 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 
 		const maybeFinishComposition = (): void => {
 			if (finished) return;
-			if (!carrierSettled || !hostStepSettled) return;
+			if (!carrierSettled || !hostStepSettled || proofInFlightCount > 0) return;
 			finished = true;
 			if (typeof use.finishAdmissionAcquisition === "function") {
 				callVoidHook(() => use.finishAdmissionAcquisition!());
@@ -1573,23 +1601,41 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 				return res;
 			},
 			completePskProof(proof: { readonly arrival: object; readonly lookupRef: object }): "redeemed" | "refused" {
-				const res = completePskProof(
-					{
-						arrival,
-						use,
-						...(currentLookupRef === undefined ? {} : { lookupRef: currentLookupRef }),
-					},
-					proof,
-				);
-				proofOutcome = res;
-				return res;
+				proofAttempted = true;
+				proofInFlightCount += 1;
+				try {
+					const res = completePskProof(
+						{
+							arrival,
+							use,
+							...(currentLookupRef === undefined ? {} : { lookupRef: currentLookupRef }),
+						},
+						proof,
+					);
+					proofOutcome = res;
+					return res;
+				} finally {
+					proofInFlightCount -= 1;
+					if (proofInFlightCount === 0 && reentrantCarrierSettledDuringProof) {
+						reentrantCarrierSettledDuringProof = false;
+						queueMicrotask(() => {
+							if (!channelAccepted && proofInFlightCount === 0) {
+								if (proofAttempted || proofOutcome !== "none") {
+									revokeUse();
+								}
+								hostStepSettled = true;
+							}
+							maybeFinishComposition();
+						});
+					}
+				}
 			},
 			acceptPskChannel(channel: { close?(): void; dispose?(): void }): void {
 				if (typeof channel !== "object" || channel === null) {
 					throw new TypeError("acceptPskChannel requires a channel object");
 				}
-				// If carrierAcquisitionSettled already ran on a no-channel path, refuse and dispose the late channel.
-				if (carrierSettled && !channelAccepted) {
+				// If carrierAcquisitionSettled already completed a no-channel path, refuse and dispose the late channel.
+				if (finished || (carrierSettled && hostStepSettled && !channelAccepted)) {
 					revokeUse();
 					disposeHostChannel(channel);
 					return;
@@ -1640,8 +1686,12 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 			carrierAcquisitionSettled(): void {
 				if (carrierSettled) return;
 				carrierSettled = true;
+				if (proofInFlightCount > 0) {
+					reentrantCarrierSettledDuringProof = true;
+					return;
+				}
 				if (!channelAccepted) {
-					if (proofOutcome !== "none") {
+					if (proofAttempted || proofOutcome !== "none") {
 						revokeUse();
 					}
 					hostStepSettled = true;

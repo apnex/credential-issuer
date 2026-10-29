@@ -499,6 +499,37 @@ test("CIss5, A3, A4, D10-E2: classification of issuer-unavailable vs issuer-refu
 	}
 	assert.equal(secretByteLengthGetterCalls, 0, "D54 must not invoke own byteLength getter on secret");
 
+	// One-shot Proxy getPrototypeOf throw with nested rejected Promise on in-process secret is observed by readExactUint8Array (Attempt 5 F2)
+	let thrownSecretProxyOnce = false;
+	const proxySecret = new Proxy(new Uint8Array(32).fill(7), {
+		getPrototypeOf(t) {
+			if (!thrownSecretProxyOnce) {
+				thrownSecretProxyOnce = true;
+				throw { nested: Promise.reject(new Error("D55 unobserved rejection from secret reflection")) };
+			}
+			return Reflect.getPrototypeOf(t);
+		},
+	});
+	currentResponse = {
+		ok: true,
+		redemptionId: "g1-1",
+		pskIdentity: "g1-1",
+		secret: proxySecret,
+		bearerToken: "ci_key_g1-1",
+		proofMode: "native-tls13-external-psk-v1",
+		issuer: "zorg-signin",
+		principal: "alice",
+		hub: "zorg-hub",
+		node: "alice.0123456789abcdef",
+		instanceBinding: "g1-1",
+		continuationSecret: "ci_cont_1",
+		validBeforeMonotonicMs: clock.now() + 60_000,
+	};
+	const proxySecAttempt = presenter.createCredentialAttempt(undefined, { releaseUnused() {} });
+	assert.equal((await proxySecAttempt.prepareCredential()).kind, "issuer-unavailable");
+	await proxySecAttempt.dispose();
+	await new Promise((r) => setImmediate(r));
+
 	// Plain-JSON wire response carrying only secretHex (without Uint8Array secret) is decoded into a 32-byte Uint8Array (o:F1)
 	currentResponse = {
 		ok: true,

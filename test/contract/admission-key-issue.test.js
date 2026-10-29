@@ -463,4 +463,55 @@ test("CIss2, D10-E2: isSignInRevoked rechecked at serialized commit, lease/handl
 		}),
 		{ ok: false, code: "proof-refused" },
 	);
+
+	// 6) Standing code expiring on wallClock during randomBytes(32) draw in both new-lease and renewal branches is refused as proof-refused (Attempt 5 F1)
+	for (const endWall of [1009, 1010, 1011]) {
+		for (const isRenewal of [false, true]) {
+			const c = createTestClock(100);
+			let wall = 1000;
+			let advanceOnRandom = false;
+			const wc = { nowMs: () => wall };
+			const scIssuer = createCredentialIssuer({
+				hub: "zorg-hub",
+				verifiers,
+				clock: c,
+				wallClock: wc,
+				allowStandingCode: () => true,
+				randomBytes(len) {
+					if (advanceOnRandom) wall = endWall;
+					return new Uint8Array(len).fill(9);
+				},
+			});
+			const sc = await scIssuer.mintStandingCode({
+				proof: "alice-a",
+				identity: "alice",
+				expiresAtMs: 1010,
+			});
+			assert.equal(sc.ok, true);
+			let contSecret;
+			if (isRenewal) {
+				const firstKey = await scIssuer.issueAdmissionKey({
+					grantType: "client_credentials",
+					clientSecret: sc.code,
+					hub: "zorg-hub",
+					node: "alice.0123456789abcdef",
+				});
+				assert.equal(firstKey.ok, true);
+				contSecret = firstKey.continuationSecret;
+			}
+			advanceOnRandom = true;
+			const res = await scIssuer.issueAdmissionKey({
+				grantType: "client_credentials",
+				clientSecret: sc.code,
+				hub: "zorg-hub",
+				node: "alice.0123456789abcdef",
+				...(contSecret !== undefined ? { continuationSecret: contSecret } : {}),
+			});
+			if (endWall < 1010) {
+				assert.equal(res.ok, true);
+			} else {
+				assert.deepEqual(res, { ok: false, code: "proof-refused" });
+			}
+		}
+	}
 });
