@@ -1,0 +1,41 @@
+{
+  "package": "@apnex/credential-issuer",
+  "paths": {
+    ".": {
+      "exports": {
+        "createCredentialIssuer": {
+          "part": "credential-issuer",
+          "serves": [
+            "standing-code",
+            "admission-key-issue",
+            "single-use-admission",
+            "admission-key-verifier",
+            "preshared-key-secret",
+            "key-reuse-report"
+          ]
+        },
+        "createMemoryStandingCodeStore": {
+          "part": "credential-issuer",
+          "serves": ["standing-code"]
+        },
+        "createCredentialPresenterTarget": {
+          "part": "credential-issuer",
+          "serves": ["fresh-key-per-dial"]
+        },
+        "observeAdjacencyRefusal": {
+          "part": "credential-issuer",
+          "serves": ["fresh-key-per-dial"]
+        }
+      }
+    },
+    "./machine": {
+      "exports": {
+        "createFileStandingCodeStore": {
+          "part": "credential-issuer",
+          "serves": ["standing-code"]
+        }
+      }
+    }
+  },
+  "deferred": {}
+}

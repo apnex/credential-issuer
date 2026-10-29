@@ -19,6 +19,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./machine": {
+      "types": "./dist/machine.d.ts",
+      "default": "./dist/machine.js"
     }
   },
   "files": [
@@ -30,7 +34,15 @@
     "docs:check": "tools/check-docs.sh"
   },
   "devDependencies": {
+    "@agp/core": "file:../agp/packages/core",
     "@types/node": "^24.0.0",
     "typescript": "5.9.3"
+  },
+  "peerDependencies": {
+    "@agp/core": "file:../agp/packages/core"
+  },
+  "dependencies": {
+    "@apnex/caller-identity": "file:../caller-identity",
+    "@apnex/shape-check": "file:../shape-check"
   }
 }

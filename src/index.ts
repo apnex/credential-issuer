@@ -1,5 +1,53 @@
 /**
- * Public surface of credential-issuer: exactly the capabilities CONTRACT.md lists, and nothing else.
- * Empty until a capability is built.
+ * Public surface of `@apnex/credential-issuer`: exactly what `export-map.json` and `CONTRACT.md` declare.
  */
-export {};
+export { createCredentialIssuer } from "./credential-issuer.js";
+export { createMemoryStandingCodeStore } from "./standing-code-store.js";
+export { createCredentialPresenterTarget, observeAdjacencyRefusal } from "./presenter-target.js";
+export type { Cancellable, ClockPort, WallClockPort } from "./clock-adapter.js";
+export type {
+	AdjacencyCredentialSnapshotItem,
+	AdjacencyRefusalObserver,
+	AdjacencyRefusalObserverOptions,
+	AdmissionHandoffCallbacks,
+	AdmissionKeyClaims,
+	AdmissionKeyProofMode,
+	AdmissionRedemptionPort,
+	AdmissionUse,
+	AdmissionUseControl,
+	AdmissionUseObservation,
+	AdmissionUsePool,
+	BeginPskArrivalResult,
+	ClientPrimaryProof,
+	CredentialAttempt,
+	CredentialCarrierReservation,
+	CredentialIssuer,
+	CredentialIssuerOptions,
+	CredentialPresenterTarget,
+	CredentialPresenterTargetOptions,
+	CredentialRedeemer,
+	CredentialVerifier,
+	IdentityDenialCode,
+	IssueAdmissionKeyRefusalCode,
+	IssueAdmissionKeyRequest,
+	IssueAdmissionKeyResult,
+	IssuedAdmissionKey,
+	KeyReuseReport,
+	ListStandingCodesRequest,
+	ListStandingCodesResult,
+	MintStandingCodeRequest,
+	MintStandingCodeResult,
+	NativePskProofAttempt,
+	PrepareCredentialResult,
+	PreparedCredentialConnection,
+	PublicStandingCodeRecord,
+	RecordAdmissionRedemptionResult,
+	RedeemedAdmissionVerifier,
+	RedeemedAdmissionVerifyInput,
+	RedeemedAdmissionVerifyResult,
+	ResolvePskResult,
+	RevokeStandingCodeRequest,
+	RevokeStandingCodeResult,
+	StandingCodeRecord,
+	StandingCodeStore,
+} from "./issuer-types.js";
