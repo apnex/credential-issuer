@@ -649,4 +649,51 @@ test("CIss3, A2, D72, D10-E2: beginPskArrival compositionSettled sequence across
 		assert.ok(f3Events.indexOf("termination") > f3Events.indexOf("proof-return"), JSON.stringify(f3Events));
 		assert.ok(f3Events.indexOf("finish") > f3Events.indexOf("proof-return"), JSON.stringify(f3Events));
 	}
+
+	// 10) Late acceptPskChannel after reentrant no-channel carrierAcquisitionSettled() (before queued cleanup microtask runs)
+	// is refused and disposes the late channel without offering it (Attempt 6 F2)
+	const f2LateKey = await issuer.issueAdmissionKey({
+		proof: { kind: "sign-in", token: "alice-token" },
+		hub: "zorg-hub",
+		node: "alice.0123456789abcdef",
+		continuationSecret: keyNoChan.continuationSecret,
+	});
+	let f2LateAttempt;
+	let f2LateOffers = 0;
+	let f2LateClosed = 0;
+	let f2LateFinished = 0;
+	let f2LateStops = 0;
+	const f2LateUse = {
+		lifecycle: { readAdmissionUse: () => ({ state: "pending" }) },
+		control: { requestAdmissionTermination() { f2LateStops += 1; } },
+		redemption: {
+			recordAdmissionRedemption(id) {
+				f2LateAttempt.carrierAcquisitionSettled();
+				return { kind: "recorded", context: { redemptionId: id, lifecycle: f2LateUse.lifecycle } };
+			},
+		},
+		sealAdmissionHandoff(ch) {
+			return { kind: "sealed", handoff: { channel: ch } };
+		},
+		finishAdmissionAcquisition() {
+			f2LateFinished += 1;
+		},
+	};
+	f2LateAttempt = issuer.beginPskArrival(
+		{ reserveAdmissionUse: () => ({ kind: "reserved", use: f2LateUse }) },
+		{ acceptAdmission() { f2LateOffers += 1; } },
+		{},
+	);
+	const f2LateLook = f2LateAttempt.resolvePsk(f2LateKey.pskIdentity);
+	assert.equal(
+		f2LateAttempt.completePskProof({ arrival: f2LateAttempt.arrival, lookupRef: f2LateLook.lookupRef }),
+		"redeemed",
+	);
+	// Synchronously call acceptPskChannel before the deferred no-channel microtask runs: must be refused and closed!
+	f2LateAttempt.acceptPskChannel({ close() { f2LateClosed += 1; } });
+	await f2LateAttempt.settled;
+	assert.equal(f2LateOffers, 0, "late channel after no-channel carrier settlement is never offered");
+	assert.equal(f2LateClosed, 1, "late channel is closed");
+	assert.equal(f2LateFinished, 1);
+	assert.ok(f2LateStops >= 1);
 });

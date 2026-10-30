@@ -271,17 +271,29 @@ function readRedemptionOutcome(
 		}
 		const names = Object.getOwnPropertyNames(raw);
 		const props = new Map<string, unknown>();
+		let descriptorFailed = false;
 		for (const name of names) {
-			const desc = Object.getOwnPropertyDescriptor(raw, name);
+			let desc: PropertyDescriptor | undefined;
+			try {
+				desc = Object.getOwnPropertyDescriptor(raw, name);
+			} catch (descErr) {
+				capturedValues.push(descErr);
+				descriptorFailed = true;
+				continue;
+			}
 			if (desc !== undefined && Object.hasOwn(desc, "value")) {
 				capturedValues.push(desc.value);
 			}
 			if (desc === undefined || !desc.enumerable || !Object.hasOwn(desc, "value")) {
-				return failUncertain();
+				descriptorFailed = true;
+				continue;
 			}
 			props.set(name, desc.value);
 		}
 		rawEnumerated = true;
+		if (descriptorFailed) {
+			return failUncertain();
+		}
 		const kind = props.get("kind");
 		if (typeof kind !== "string") {
 			return failUncertain();
@@ -300,12 +312,24 @@ function readRedemptionOutcome(
 				const ctxNames = Object.getOwnPropertyNames(ctx);
 				if (ctxNames.length !== 2) return failUncertain();
 				const ctxProps = new Map<string, unknown>();
+				let ctxDescFailed = false;
 				for (const ck of ctxNames) {
-					const d = Object.getOwnPropertyDescriptor(ctx, ck);
+					let d: PropertyDescriptor | undefined;
+					try {
+						d = Object.getOwnPropertyDescriptor(ctx, ck);
+					} catch (ctxErr) {
+						capturedValues.push(ctxErr);
+						ctxDescFailed = true;
+						continue;
+					}
 					if (d !== undefined && Object.hasOwn(d, "value")) capturedValues.push(d.value);
-					if (d === undefined || !d.enumerable || !Object.hasOwn(d, "value")) return failUncertain();
+					if (d === undefined || !d.enumerable || !Object.hasOwn(d, "value")) {
+						ctxDescFailed = true;
+						continue;
+					}
 					ctxProps.set(ck, d.value);
 				}
+				if (ctxDescFailed) return failUncertain();
 				if (
 					ctxProps.get("redemptionId") !== expectedRedemptionId ||
 					ctxProps.get("lifecycle") !== expectedLifecycle
@@ -725,18 +749,30 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 					return "unwritable";
 				}
 				const capturedErrorValues: unknown[] = [];
+				let names: string[] = [];
 				try {
-					for (const name of Object.getOwnPropertyNames(error)) {
-						const desc = Object.getOwnPropertyDescriptor(error, name);
-						if (desc !== undefined && Object.hasOwn(desc, "value")) {
-							capturedErrorValues.push(desc.value);
-							if (name === "afterRename" && desc.enumerable === true && desc.value === true) {
-								storeQuarantined = true;
-							}
+					names = Object.getOwnPropertyNames(error);
+				} catch (namesErr) {
+					capturedErrorValues.push(namesErr);
+					storeQuarantined = true;
+				}
+				for (const name of names) {
+					let desc: PropertyDescriptor | undefined;
+					try {
+						desc = Object.getOwnPropertyDescriptor(error, name);
+					} catch (descErr) {
+						capturedErrorValues.push(descErr);
+						if (name === "afterRename") {
+							storeQuarantined = true;
+						}
+						continue;
+					}
+					if (desc !== undefined && Object.hasOwn(desc, "value")) {
+						capturedErrorValues.push(desc.value);
+						if (name === "afterRename" && desc.enumerable === true && desc.value === true) {
+							storeQuarantined = true;
 						}
 					}
-				} catch (descErr) {
-					capturedErrorValues.push(descErr);
 				}
 				for (const item of capturedErrorValues) observePromises(item);
 			}
@@ -1634,8 +1670,8 @@ export function createCredentialIssuer(options: CredentialIssuerOptions): Creden
 				if (typeof channel !== "object" || channel === null) {
 					throw new TypeError("acceptPskChannel requires a channel object");
 				}
-				// If carrierAcquisitionSettled already completed a no-channel path, refuse and dispose the late channel.
-				if (finished || (carrierSettled && hostStepSettled && !channelAccepted)) {
+				// If carrierAcquisitionSettled was already called before any channel was accepted, refuse and dispose the late channel (Attempt 6 F2).
+				if (finished || (carrierSettled && !channelAccepted)) {
 					revokeUse();
 					disposeHostChannel(channel);
 					return;

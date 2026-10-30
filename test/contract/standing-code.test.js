@@ -475,6 +475,51 @@ test("CIss1, D10-E2: createFileStandingCodeStore persistence across restart, sym
 		"changing-proxy post-rename failure quarantines the store",
 	);
 
+	// Throwing earlier property descriptor on save error still reads afterRename: true and observes sibling rejected Promise (Attempt 6 F1)
+	const f1Mem = createMemoryStandingCodeStore();
+	let f1Armed = false;
+	const f1Trace = [];
+	const f1Issuer = createCredentialIssuer({
+		hub: "zorg-hub",
+		verifiers: [verifier],
+		standingCodeStore: {
+			load: () => f1Mem.load(),
+			save(recs) {
+				f1Mem.save(recs);
+				if (f1Armed) {
+					throw new Proxy(
+						{ unrelated: 0, afterRename: true, nested: Promise.reject(new Error("D55 sibling save error rejection")) },
+						{
+							getOwnPropertyDescriptor(target, prop) {
+								f1Trace.push(prop);
+								if (prop === "unrelated") throw new Error("unrelated descriptor fault");
+								return Reflect.getOwnPropertyDescriptor(target, prop);
+							},
+						},
+					);
+				}
+			},
+		},
+		clock,
+		wallClock,
+	});
+	const f1Mint = await f1Issuer.mintStandingCode({ proof: "signin-alice", identity: "alice" });
+	assert.equal(f1Mint.ok, true);
+	f1Armed = true;
+	const f1Revoke = await f1Issuer.revokeStandingCode({ proof: "signin-alice", codeId: f1Mint.codeId });
+	assert.deepEqual(f1Revoke, { ok: false, code: "code-store-unwritable" });
+	await new Promise((r) => setImmediate(r));
+	assert.deepEqual(f1Trace, ["unrelated", "afterRename", "nested"]);
+	assert.deepEqual(
+		await f1Issuer.issueAdmissionKey({
+			grantType: "client_credentials",
+			clientSecret: f1Mint.code,
+			hub: "zorg-hub",
+			node: "alice.0123456789abcdef",
+		}),
+		{ ok: false, code: "code-store-unwritable" },
+	);
+
 	// Sign-in expiry during async isSignInRevoked in mintStandingCode, listStandingCodes, and revokeStandingCode (F3)
 	for (const method of ["mintStandingCode", "listStandingCodes", "revokeStandingCode"]) {
 		const expClock = createTestClock(100);

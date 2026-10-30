@@ -87,15 +87,27 @@ function snapshotPrimaryProof(raw: unknown): ClientPrimaryProof {
 		}
 		const names = Object.getOwnPropertyNames(raw);
 		const props = new Map<string, unknown>();
+		let descFailed = false;
 		for (const name of names) {
-			const desc = Object.getOwnPropertyDescriptor(raw, name);
+			let desc: PropertyDescriptor | undefined;
+			try {
+				desc = Object.getOwnPropertyDescriptor(raw, name);
+			} catch (descErr) {
+				captured.push(descErr);
+				descFailed = true;
+				continue;
+			}
 			if (desc !== undefined && Object.hasOwn(desc, "value")) {
 				captured.push(desc.value);
 			}
 			if (desc === undefined || !desc.enumerable || !Object.hasOwn(desc, "value")) {
-				return failProof("getProof() properties must be own enumerable data descriptors");
+				descFailed = true;
+				continue;
 			}
 			props.set(name, desc.value);
+		}
+		if (descFailed) {
+			return failProof("getProof() properties must be own enumerable data descriptors");
 		}
 		if (names.length !== 2) {
 			return failProof("getProof() result must have exactly two own properties");
@@ -194,20 +206,30 @@ function readIssueKeyResult(
 		// Extract optional in-process Uint8Array `secret` via own data descriptor before passing plain JSON fields to readPlainJson.
 		let extractedSecretBytes: Uint8Array | undefined;
 		let hadSecretProp = false;
+		let responseDescFailed = false;
 		const plainCandidate: Record<string, unknown> = {};
 		for (const key of Object.getOwnPropertyNames(raw)) {
-			const desc = Object.getOwnPropertyDescriptor(raw, key);
+			let desc: PropertyDescriptor | undefined;
+			try {
+				desc = Object.getOwnPropertyDescriptor(raw, key);
+			} catch (descErr) {
+				captured.push(descErr);
+				responseDescFailed = true;
+				continue;
+			}
 			if (desc !== undefined && Object.hasOwn(desc, "value")) {
 				captured.push(desc.value);
 			}
 			if (desc === undefined || !desc.enumerable || !Object.hasOwn(desc, "value")) {
-				return failUnavailable("malformed-issue-key-response");
+				responseDescFailed = true;
+				continue;
 			}
 			if (key === "secret") {
 				hadSecretProp = true;
 				const copiedSecret = readExactUint8Array(desc.value, 32);
 				if (copiedSecret === null) {
-					return failUnavailable("malformed-psk-secret");
+					responseDescFailed = true;
+					continue;
 				}
 				extractedSecretBytes = copiedSecret;
 			} else {
@@ -218,6 +240,9 @@ function readIssueKeyResult(
 					configurable: true,
 				});
 			}
+		}
+		if (responseDescFailed) {
+			return failUnavailable("malformed-issue-key-response");
 		}
 
 		const plain = readPlainJson(plainCandidate);
