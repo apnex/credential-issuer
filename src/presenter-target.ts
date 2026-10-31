@@ -67,11 +67,21 @@ async function settleNativePromiseOrValue(raw: unknown): Promise<{ readonly ok: 
 	});
 }
 
-/** Reads and deeply snapshots a `ClientPrimaryProof` via own enumerable data descriptors and `readPlainJson` (`CIss5`, `F4`, `F6`). */
+/** Reads and deeply snapshots a `ClientPrimaryProof` via own enumerable data descriptors and `readPlainJson` (`CIss5`, `F4`, `F6`, Attempt 7 `F2`). */
 function snapshotPrimaryProof(raw: unknown): ClientPrimaryProof {
-	const captured: unknown[] = [raw];
+	const capturedValues: unknown[] = [];
+	let rawEnumerated = false;
+	let observed = false;
+	const observeCapturedOnce = (): void => {
+		if (observed) return;
+		observed = true;
+		if (!rawEnumerated) {
+			observePromises(raw);
+		}
+		for (const item of capturedValues) observePromises(item);
+	};
 	const failProof = (message: string): never => {
-		for (const item of captured) observePromises(item);
+		observeCapturedOnce();
 		throw new TypeError(message);
 	};
 	try {
@@ -93,12 +103,12 @@ function snapshotPrimaryProof(raw: unknown): ClientPrimaryProof {
 			try {
 				desc = Object.getOwnPropertyDescriptor(raw, name);
 			} catch (descErr) {
-				captured.push(descErr);
+				capturedValues.push(descErr);
 				descFailed = true;
 				continue;
 			}
 			if (desc !== undefined && Object.hasOwn(desc, "value")) {
-				captured.push(desc.value);
+				capturedValues.push(desc.value);
 			}
 			if (desc === undefined || !desc.enumerable || !Object.hasOwn(desc, "value")) {
 				descFailed = true;
@@ -106,6 +116,7 @@ function snapshotPrimaryProof(raw: unknown): ClientPrimaryProof {
 			}
 			props.set(name, desc.value);
 		}
+		rawEnumerated = true;
 		if (descFailed) {
 			return failProof("getProof() properties must be own enumerable data descriptors");
 		}
@@ -136,8 +147,10 @@ function snapshotPrimaryProof(raw: unknown): ClientPrimaryProof {
 		}
 		return failProof("getProof() kind must be \"sign-in\" or \"standing-code\"");
 	} catch (error) {
-		captured.push(error);
-		for (const item of captured) observePromises(item);
+		if (!observed) {
+			capturedValues.push(error);
+			observeCapturedOnce();
+		}
 		if (error instanceof TypeError) {
 			throw error;
 		}
@@ -185,9 +198,13 @@ function readIssueKeyResult(
 	  }
 	| { readonly kind: "refused"; readonly code: IssueAdmissionKeyRefusalCode }
 	| { readonly kind: "unavailable"; readonly reason: string } {
-	const captured: unknown[] = [raw];
+	const capturedValues: unknown[] = [];
+	let rawEnumerated = false;
 	const failUnavailable = (reason: string): { readonly kind: "unavailable"; readonly reason: string } => {
-		for (const item of captured) observePromises(item);
+		if (!rawEnumerated) {
+			observePromises(raw);
+		}
+		for (const item of capturedValues) observePromises(item);
 		return { kind: "unavailable", reason };
 	};
 
@@ -213,12 +230,12 @@ function readIssueKeyResult(
 			try {
 				desc = Object.getOwnPropertyDescriptor(raw, key);
 			} catch (descErr) {
-				captured.push(descErr);
+				capturedValues.push(descErr);
 				responseDescFailed = true;
 				continue;
 			}
 			if (desc !== undefined && Object.hasOwn(desc, "value")) {
-				captured.push(desc.value);
+				capturedValues.push(desc.value);
 			}
 			if (desc === undefined || !desc.enumerable || !Object.hasOwn(desc, "value")) {
 				responseDescFailed = true;
@@ -241,6 +258,7 @@ function readIssueKeyResult(
 				});
 			}
 		}
+		rawEnumerated = true;
 		if (responseDescFailed) {
 			return failUnavailable("malformed-issue-key-response");
 		}
@@ -344,7 +362,7 @@ function readIssueKeyResult(
 			},
 		};
 	} catch (error) {
-		captured.push(error);
+		capturedValues.push(error);
 		return failUnavailable("exception-reading-issue-key");
 	}
 }

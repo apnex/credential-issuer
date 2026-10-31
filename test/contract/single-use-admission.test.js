@@ -540,6 +540,30 @@ test("CIss3, A2, D72, D10-E2: beginPskArrival compositionSettled sequence across
 	assert.equal(f3KindReads, 1, "recordAdmissionRedemption result kind descriptor is read only once");
 	await new Promise((r) => setImmediate(r));
 
+	// Nested context with mismatched lifecycle reads each context descriptor only once (Attempt 7 F2)
+	const ctxCountKey = await agpIssuer.issueAdmissionKey({
+		proof: { kind: "sign-in", token: "alice-token" },
+		hub: "zorg-hub",
+		node: "alice.0123456789abcdef",
+		proofMode: "bearer",
+		continuationSecret: agpKey.continuationSecret,
+	});
+	const ctxReads = { redemptionId: 0, lifecycle: 0 };
+	const ctxMismatchUse = makeUse((id) => ({
+		kind: "recorded",
+		context: new Proxy(
+			{ redemptionId: id, lifecycle: {} },
+			{
+				getOwnPropertyDescriptor(t, p) {
+					if (p in ctxReads) ctxReads[p] += 1;
+					return Reflect.getOwnPropertyDescriptor(t, p);
+				},
+			},
+		),
+	}));
+	assert.equal(agpIssuer.redeemBearer(ctxMismatchUse.use, ctxCountKey.bearerToken), "refused");
+	assert.deepEqual(ctxReads, { redemptionId: 1, lifecycle: 1 }, "nested context descriptors are read only once on mismatch");
+
 	// 8) Reentrant sweepLeases() called inside readAdmissionUse() during second-presentation reuse never throws and emits the reuse report (Attempt 4 F2)
 	for (const mode of ["bearer", "native-tls13-external-psk-v1"]) {
 		const f2Clock = createTestClock(100);

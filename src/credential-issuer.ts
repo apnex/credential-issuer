@@ -311,6 +311,10 @@ function readRedemptionOutcome(
 				if (Object.getOwnPropertySymbols(ctx).length > 0) return failUncertain();
 				const ctxNames = Object.getOwnPropertyNames(ctx);
 				if (ctxNames.length !== 2) return failUncertain();
+				// Remove `ctx` from `capturedValues` before enumerating its own descriptors so `failUncertain`
+				// does not re-walk `ctx` a second time after its own descriptors are captured (Attempt 7 F2).
+				const ctxIdx = capturedValues.indexOf(ctx);
+				if (ctxIdx >= 0) capturedValues.splice(ctxIdx, 1);
 				const ctxProps = new Map<string, unknown>();
 				let ctxDescFailed = false;
 				for (const ck of ctxNames) {

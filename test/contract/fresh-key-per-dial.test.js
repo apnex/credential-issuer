@@ -530,6 +530,43 @@ test("CIss5, A3, A4, D10-E2: classification of issuer-unavailable vs issuer-refu
 	await proxySecAttempt.dispose();
 	await new Promise((r) => setImmediate(r));
 
+	// Single-pass descriptor read on malformed getProof() and malformed issueKey() response (Attempt 7 F2)
+	const proofReads = { kind: 0, token: 0, extra: 0 };
+	const countingProofPresenter = createCredentialPresenterTarget({
+		hub: "zorg-hub",
+		node: "alice.0123456789abcdef",
+		clock,
+		getProof: () =>
+			new Proxy(
+				{ kind: "sign-in", token: "alice-token", extra: 0 },
+				{
+					getOwnPropertyDescriptor(t, p) {
+						if (p in proofReads) proofReads[p] += 1;
+						return Reflect.getOwnPropertyDescriptor(t, p);
+					},
+				},
+			),
+		issueKey: () => ({ ok: false, code: "proof-refused" }),
+		connectWithKey: async () => ({}),
+	});
+	assert.throws(() => countingProofPresenter.createCredentialAttempt(undefined, { releaseUnused() {} }), TypeError);
+	assert.deepEqual(proofReads, { kind: 1, token: 1, extra: 1 }, "malformed getProof() reads each descriptor once");
+
+	const issueReads = { ok: 0, code: 0, extra: 0 };
+	currentResponse = new Proxy(
+		{ ok: false, code: "proof-refused", extra: 0 },
+		{
+			getOwnPropertyDescriptor(t, p) {
+				if (p in issueReads) issueReads[p] += 1;
+				return Reflect.getOwnPropertyDescriptor(t, p);
+			},
+		},
+	);
+	const countingIssueAttempt = presenter.createCredentialAttempt(undefined, { releaseUnused() {} });
+	assert.equal((await countingIssueAttempt.prepareCredential()).kind, "issuer-unavailable");
+	await countingIssueAttempt.dispose();
+	assert.deepEqual(issueReads, { ok: 1, code: 1, extra: 1 }, "malformed issueKey() reads each descriptor once");
+
 	// Plain-JSON wire response carrying only secretHex (without Uint8Array secret) is decoded into a 32-byte Uint8Array (o:F1)
 	currentResponse = {
 		ok: true,
