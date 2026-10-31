@@ -15,6 +15,23 @@ import {
 	createCredentialPresenterTarget,
 	observeAdjacencyRefusal,
 } from "@apnex/credential-issuer";
+import { readPlainJson } from "@apnex/shape-check";
+
+/** Wraps `target` in a Proxy that counts `getOwnPropertyDescriptor` per key into `counts`, throwing for `throwOn`. */
+function countingProxy(target, counts, throwOn) {
+	return new Proxy(target, {
+		getOwnPropertyDescriptor(t, p) {
+			counts[p] = (counts[p] ?? 0) + 1;
+			if (p === throwOn) throw new Error(`descriptor read of ${String(p)} throws`);
+			return Reflect.getOwnPropertyDescriptor(t, p);
+		},
+	});
+}
+
+/** A token object that `readPlainJson` refuses because it carries an accessor property. */
+function tokenWithGetter() {
+	return Object.defineProperty({ sub: "alice" }, "role", { get: () => "admin", enumerable: true });
+}
 
 function createTestClock(initialMs = 1_000_000) {
 	let nowMs = initialMs;
@@ -566,6 +583,65 @@ test("CIss5, A3, A4, D10-E2: classification of issuer-unavailable vs issuer-refu
 	assert.equal((await countingIssueAttempt.prepareCredential()).kind, "issuer-unavailable");
 	await countingIssueAttempt.dispose();
 	assert.deepEqual(issueReads, { ok: 1, code: 1, extra: 1 }, "malformed issueKey() reads each descriptor once");
+
+	// Attempt 7 F2 controls: well-formed results read each descriptor once; a nested container is read no more
+	// often than readPlainJson alone reads it; an earlier descriptor throw still observes a rejected-promise sibling.
+	let proofFactory = () => ({ kind: "sign-in", token: "alice-token" });
+	const proofControlPresenter = createCredentialPresenterTarget({
+		hub: "zorg-hub",
+		node: "alice.0123456789abcdef",
+		clock,
+		getProof: () => proofFactory(),
+		issueKey: () => ({ ok: false, code: "proof-refused" }),
+		connectWithKey: async () => ({}),
+	});
+
+	const validProofReads = {};
+	proofFactory = () => countingProxy({ kind: "sign-in", token: "alice-token" }, validProofReads);
+	const validProofAttempt = proofControlPresenter.createCredentialAttempt(undefined, { releaseUnused() {} });
+	await validProofAttempt.dispose();
+	assert.deepEqual(validProofReads, { kind: 1, token: 1 }, "well-formed getProof() reads each descriptor once");
+
+	const baselineTokenReads = {};
+	assert.equal(readPlainJson(countingProxy(tokenWithGetter(), baselineTokenReads)).ok, false);
+	const nestedTokenReads = {};
+	proofFactory = () => ({ kind: "sign-in", token: countingProxy(tokenWithGetter(), nestedTokenReads) });
+	assert.throws(() => proofControlPresenter.createCredentialAttempt(undefined, { releaseUnused() {} }), TypeError);
+	assert.deepEqual(nestedTokenReads, baselineTokenReads, "refused nested token is walked only by readPlainJson");
+
+	const throwingProofReads = {};
+	proofFactory = () =>
+		countingProxy({ kind: "sign-in", token: Promise.reject(new Error("D55 sibling rejection in getProof()")) }, throwingProofReads, "kind");
+	assert.throws(() => proofControlPresenter.createCredentialAttempt(undefined, { releaseUnused() {} }), TypeError);
+	assert.deepEqual(throwingProofReads, { kind: 1, token: 1 }, "earlier proof descriptor throw reads each descriptor once");
+
+	const validRefusalReads = {};
+	currentResponse = countingProxy({ ok: false, code: "proof-refused" }, validRefusalReads);
+	const validRefusalAttempt = presenter.createCredentialAttempt(undefined, { releaseUnused() {} });
+	assert.deepEqual(await validRefusalAttempt.prepareCredential(), { kind: "issuer-refused", code: "proof-refused" });
+	await validRefusalAttempt.dispose();
+	assert.deepEqual(validRefusalReads, { ok: 1, code: 1 }, "well-formed issueKey() refusal reads each descriptor once");
+
+	const baselineNestedCodeReads = {};
+	assert.equal(readPlainJson({ ok: false, code: countingProxy({ reason: "x" }, baselineNestedCodeReads) }).ok, true);
+	const nestedCodeReads = {};
+	currentResponse = { ok: false, code: countingProxy({ reason: "x" }, nestedCodeReads) };
+	const nestedCodeAttempt = presenter.createCredentialAttempt(undefined, { releaseUnused() {} });
+	assert.equal((await nestedCodeAttempt.prepareCredential()).kind, "issuer-unavailable");
+	await nestedCodeAttempt.dispose();
+	assert.deepEqual(nestedCodeReads, baselineNestedCodeReads, "nested issueKey() container is walked only by readPlainJson");
+
+	const throwingIssueReads = {};
+	currentResponse = countingProxy(
+		{ ok: false, code: Promise.reject(new Error("D55 sibling rejection in issueKey()")) },
+		throwingIssueReads,
+		"ok",
+	);
+	const throwingIssueAttempt = presenter.createCredentialAttempt(undefined, { releaseUnused() {} });
+	assert.equal((await throwingIssueAttempt.prepareCredential()).kind, "issuer-unavailable");
+	await throwingIssueAttempt.dispose();
+	assert.deepEqual(throwingIssueReads, { ok: 1, code: 1 }, "earlier issueKey() descriptor throw reads each descriptor once");
+	await new Promise((r) => setImmediate(r));
 
 	// Plain-JSON wire response carrying only secretHex (without Uint8Array secret) is decoded into a 32-byte Uint8Array (o:F1)
 	currentResponse = {

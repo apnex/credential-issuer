@@ -564,6 +564,48 @@ test("CIss3, A2, D72, D10-E2: beginPskArrival compositionSettled sequence across
 	assert.equal(agpIssuer.redeemBearer(ctxMismatchUse.use, ctxCountKey.bearerToken), "refused");
 	assert.deepEqual(ctxReads, { redemptionId: 1, lifecycle: 1 }, "nested context descriptors are read only once on mismatch");
 
+	// Well-formed nested context reads each descriptor once, and an earlier context descriptor throw still
+	// observes a rejected-promise sibling while reading each descriptor once (Attempt 7 F2)
+	const countContextReads = (target, counts, throwOn) =>
+		new Proxy(target, {
+			getOwnPropertyDescriptor(t, p) {
+				counts[p] = (counts[p] ?? 0) + 1;
+				if (p === throwOn) throw new Error(`context descriptor read of ${String(p)} throws`);
+				return Reflect.getOwnPropertyDescriptor(t, p);
+			},
+		});
+	const issueCtxKey = () =>
+		agpIssuer.issueAdmissionKey({
+			proof: { kind: "sign-in", token: "alice-token" },
+			hub: "zorg-hub",
+			node: "alice.0123456789abcdef",
+			proofMode: "bearer",
+			continuationSecret: agpKey.continuationSecret,
+		});
+	const validCtxKey = await issueCtxKey();
+	const validCtxReads = {};
+	let validCtxUse;
+	validCtxUse = makeUse((id) => ({
+		kind: "recorded",
+		context: countContextReads({ redemptionId: id, lifecycle: validCtxUse.use.lifecycle }, validCtxReads),
+	}));
+	assert.equal(agpIssuer.redeemBearer(validCtxUse.use, validCtxKey.bearerToken), "redeemed");
+	assert.deepEqual(validCtxReads, { redemptionId: 1, lifecycle: 1 }, "well-formed nested context reads each descriptor once");
+
+	const throwingCtxKey = await issueCtxKey();
+	const throwingCtxReads = {};
+	const throwingCtxUse = makeUse((id) => ({
+		kind: "recorded",
+		context: countContextReads(
+			{ redemptionId: id, lifecycle: Promise.reject(new Error("D55 sibling rejection in context")) },
+			throwingCtxReads,
+			"redemptionId",
+		),
+	}));
+	assert.equal(agpIssuer.redeemBearer(throwingCtxUse.use, throwingCtxKey.bearerToken), "refused");
+	assert.deepEqual(throwingCtxReads, { redemptionId: 1, lifecycle: 1 }, "earlier context descriptor throw reads each descriptor once");
+	await new Promise((r) => setImmediate(r));
+
 	// 8) Reentrant sweepLeases() called inside readAdmissionUse() during second-presentation reuse never throws and emits the reuse report (Attempt 4 F2)
 	for (const mode of ["bearer", "native-tls13-external-psk-v1"]) {
 		const f2Clock = createTestClock(100);

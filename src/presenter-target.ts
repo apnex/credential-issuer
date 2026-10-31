@@ -80,6 +80,11 @@ function snapshotPrimaryProof(raw: unknown): ClientPrimaryProof {
 		}
 		for (const item of capturedValues) observePromises(item);
 	};
+	const dropCaptured = (value: unknown): void => {
+		for (let i = capturedValues.length - 1; i >= 0; i--) {
+			if (capturedValues[i] === value) capturedValues.splice(i, 1);
+		}
+	};
 	const failProof = (message: string): never => {
 		observeCapturedOnce();
 		throw new TypeError(message);
@@ -134,6 +139,9 @@ function snapshotPrimaryProof(raw: unknown): ClientPrimaryProof {
 			}
 			const tokenPlain = readPlainJson(tokenVal);
 			if (!tokenPlain.ok || tokenPlain.value === null) {
+				// A refusing `readPlainJson` has already observed `tokenVal` (shape-check `readPlainJson`), and an accepted
+				// value is plain JSON holding no promise, so cleanup must not walk `tokenVal` again.
+				dropCaptured(tokenVal);
 				return failProof("sign-in proof token must be a non-null plain JSON value");
 			}
 			return Object.freeze({ kind: "sign-in", token: tokenPlain.value });
@@ -264,6 +272,10 @@ function readIssueKeyResult(
 		}
 
 		const plain = readPlainJson(plainCandidate);
+		// `plainCandidate` holds every captured value except the in-process `secret`, which `readExactUint8Array`
+		// has already copied from a genuine `Uint8Array`. A refusing `readPlainJson` has observed those values and an
+		// accepted one proves they hold no promise, so no later cleanup walks them again (Attempt 7 F2).
+		capturedValues.length = 0;
 		if (!plain.ok || plain.value === null || typeof plain.value !== "object" || Array.isArray(plain.value)) {
 			return failUnavailable("malformed-issue-key-response");
 		}
