@@ -128,11 +128,12 @@ test("AGP is taken only as types: every source import of @agp is type-only, and 
 	}
 });
 
-test("the package depends on caller-identity and shape-check through file: links, and declares @agp/core as a peer", () => {
-	assert.deepEqual(pkg.dependencies, {
-		"@apnex/caller-identity": "file:../caller-identity",
-		"@apnex/shape-check": "file:../shape-check",
-	});
+const validDepSpec = (name, spec) => spec === `file:../${name}` || new RegExp(`^https://github\\.com/apnex/${name}/releases/download/v0\\.\\d+\\.\\d+/apnex-${name}-0\\.\\d+\\.\\d+\\.tgz$`).test(spec);
+
+test("the package depends on caller-identity and shape-check through file: links or pinned GitHub release URLs, and declares @agp/core as a peer", () => {
+	assert.deepEqual(Object.keys(pkg.dependencies ?? {}).sort(), ["@apnex/caller-identity", "@apnex/shape-check"]);
+	assert.ok(validDepSpec("caller-identity", pkg.dependencies["@apnex/caller-identity"]));
+	assert.ok(validDepSpec("shape-check", pkg.dependencies["@apnex/shape-check"]));
 	assert.deepEqual(pkg.peerDependencies, {
 		"@agp/core": "file:../agp/packages/core",
 	});
