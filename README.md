@@ -9,9 +9,9 @@ Its vision is ratified (zorg's `D40`), and its contract (`CIss1` to `CIss5`) spe
 - `CONTRACT.md` - what a consumer can depend on, one capability per row.
 - `docs/DECISIONS.md` - the rulings about this component.
 
-It belongs to a component set first composed by zorg (`apnex/zorg`), and is private until its first working code.
+It belongs to a component set first composed by zorg (`apnex/zorg`), and is released only by its own CI, as a tarball attached to a GitHub release with its SHA-512 beside it, which a consumer names in its `package.json`: `https://github.com/apnex/credential-issuer/releases/download/v0.1.0/apnex-credential-issuer-0.1.0.tgz` for `0.1.0`.
 
-It depends on `@apnex/shape-check` and `@apnex/caller-identity` through `file:` links, and takes AGP's types as a peer through a `file:` link to an AGP checkout beside it, each installed and built first, since none commits its `dist/`.
+It depends on `@apnex/shape-check` and `@apnex/caller-identity` through their release files, and takes AGP's types as an optional peer through a `file:` link to an AGP checkout beside it, each installed and built first, since none commits its `dist/`.
 
 To run the tests from clean checkouts:
 ```sh
