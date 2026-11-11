@@ -120,7 +120,7 @@ Tested by: `D10-E2`, in `test/contract/fresh-key-per-dial.test.js`, covering dir
 
 This repository, `apnex/credential-issuer`, and its package `@apnex/credential-issuer`, released only by its own CI as a tarball attached to a GitHub release, drafted, verified and then published (`.github/workflows/release.yml`).\
 The package `@apnex/credential-issuer` exports `createCredentialIssuer`, `createMemoryStandingCodeStore`, `createCredentialPresenterTarget`, and `observeAdjacencyRefusal`, and `@apnex/credential-issuer/machine` exports `createFileStandingCodeStore`, as `export-map.json` records.\
-It depends on `@apnex/shape-check` and `@apnex/caller-identity` through their release files, takes AGP's types from `@agp/core` as an optional peer dependency through a `file:` link to AGP's checkout, imports nothing from AGP at run time, and imports no module particular to one runtime outside files whose name ends `-adapter.ts`.
+It depends on `@apnex/shape-check` and `@apnex/caller-identity` through their release files, takes AGP's types from `@agp/core` as an optional peer dependency, `>=0.1.0`, its tests taking AGP through a `file:` link to AGP's checkout, imports nothing from AGP at run time, and imports no module particular to one runtime outside files whose name ends `-adapter.ts`.
 
 ---
 

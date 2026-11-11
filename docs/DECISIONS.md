@@ -55,3 +55,19 @@ The five fixes every consumer of the components zorg maintains needs, made by dr
 
 **Why.**\
 Draw takes components as public GitHub release files pinned by hash and runs Node 22 in production (draw's `H26-2`); a `file:` link builds only beside a checkout, and an AGP declared for install would make every consumer install it though every import of it is a type.
+
+---
+
+## D4 - 0.1.1: the optional AGP peer as a version range, and caller-identity's 0.1.1
+
+**Ruled by:** the director, 2026-11-11 (draw's `H31-9`, on zorg's reply `upstream/drawv2-planning-contract-drafts-reply.md`, which asked for this change).\
+**Affects:** `package.json` and its lockfile, `README.md` and `CONTRACT.md`'s Reference; nothing in `src/`, and nothing the component does; a patch release, `0.1.1`.
+
+**Ruling.**\
+`peerDependencies["@agp/core"]` is `>=0.1.0`, where `0.1.0` declared `file:../agp/packages/core`; it stays optional (`peerDependenciesMeta`), and the tests still take `@agp/core` as a `file:` link in `devDependencies`, as zorg's answer 3 has it (`D3`).\
+A `file:` peer is resolved by npm from the installed package's own folder, where no AGP is, so the `0.1.0` release's peer matched no host's `@agp/core`, and every consumer that installed AGP beside it was refused by `npm install` (`ERESOLVE`); a range is matched by the host's own `@agp/core`, wherever it came from.\
+`@apnex/caller-identity` is its `0.1.1` release file, whose peer is the same range (caller-identity's `D4`), and the `overrides` entry `D3` added to get past caller-identity's `0.1.0` peer is removed, since nothing needs it now: `npm install` resolves the tree without it.
+
+**Why.**\
+A consumer that runs AGP is the consumer this component serves; the fix was found in the `0.1.0` wave and asked for by zorg, whose surface test already accepts `*`, `>=0.1.0` or `^0.1.0`; `>=0.1.0` names the first AGP this component is written against without capping the host's.
+
