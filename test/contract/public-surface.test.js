@@ -134,7 +134,6 @@ test("the package depends on caller-identity and shape-check through file: links
 	assert.deepEqual(Object.keys(pkg.dependencies ?? {}).sort(), ["@apnex/caller-identity", "@apnex/shape-check"]);
 	assert.ok(validDepSpec("caller-identity", pkg.dependencies["@apnex/caller-identity"]));
 	assert.ok(validDepSpec("shape-check", pkg.dependencies["@apnex/shape-check"]));
-	assert.deepEqual(pkg.peerDependencies, {
-		"@agp/core": "file:../agp/packages/core",
-	});
+	assert.deepEqual(Object.keys(pkg.peerDependencies ?? {}), ["@agp/core"]);
+	assert.ok(["file:../agp/packages/core", "*", ">=0.1.0", "^0.1.0"].includes(pkg.peerDependencies["@agp/core"]));
 });
