@@ -1,6 +1,6 @@
 {
   "name": "@apnex/credential-issuer",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "Issue the credentials a caller presents to reach a hub, from authority the host accepts.",
   "license": "MIT",
@@ -39,7 +39,7 @@
     "typescript": "5.9.3"
   },
   "peerDependencies": {
-    "@agp/core": "file:../agp/packages/core"
+    "@agp/core": ">=0.1.0"
   },
   "peerDependenciesMeta": {
     "@agp/core": {
@@ -47,12 +47,7 @@
     }
   },
   "dependencies": {
-    "@apnex/caller-identity": "https://github.com/apnex/caller-identity/releases/download/v0.1.0/apnex-caller-identity-0.1.0.tgz",
+    "@apnex/caller-identity": "https://github.com/apnex/caller-identity/releases/download/v0.1.1/apnex-caller-identity-0.1.1.tgz",
     "@apnex/shape-check": "https://github.com/apnex/shape-check/releases/download/v0.1.0/apnex-shape-check-0.1.0.tgz"
-  },
-  "overrides": {
-    "@apnex/caller-identity": {
-      "@agp/core": "$@agp/core"
-    }
   }
 }
